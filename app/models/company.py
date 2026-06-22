@@ -1,20 +1,24 @@
-import uuid
-from decimal import Decimal
+from sqlalchemy import BigInteger, Boolean, ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from sqlalchemy import Boolean, ForeignKey, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.models.base import Base
+from app.db.base import Base, TimestampMixin
 
 
-class Company(Base):
+class Company(TimestampMixin, Base):
     __tablename__ = "companies"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
-    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
-    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    document: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+
+    owner: Mapped["User"] = relationship(back_populates="company")
+    address: Mapped["CompanyAddress | None"] = relationship(back_populates="company", uselist=False, cascade="all, delete-orphan")
+    categories: Mapped[list["ProductCategory"]] = relationship(back_populates="company", cascade="all, delete-orphan")
+    products: Mapped[list["Product"]] = relationship(back_populates="company", cascade="all, delete-orphan")
+    fee_rules: Mapped[list["DeliveryFeeRule"]] = relationship(back_populates="company", cascade="all, delete-orphan")
+    orders: Mapped[list["Order"]] = relationship(back_populates="company")

@@ -1,40 +1,50 @@
-import enum
-import uuid
 from decimal import Decimal
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Numeric, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base
-
-
-class OrderStatus(str, enum.Enum):
-    CREATED = "CREATED"
-    ACCEPTED_BY_COMPANY = "ACCEPTED_BY_COMPANY"
-    WAITING_COURIER = "WAITING_COURIER"
-    OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY"
-    DELIVERED = "DELIVERED"
-    CANCELLED = "CANCELLED"
+from app.core.enums import OrderStatus, PaymentMethod
+from app.db.base import Base, TimestampMixin
 
 
-class Order(Base):
+class Order(TimestampMixin, Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        CheckConstraint("subtotal >= 0", name="ck_orders_subtotal_non_negative"),
+        CheckConstraint("delivery_fee >= 0", name="ck_orders_delivery_fee_non_negative"),
+        CheckConstraint("total >= 0", name="ck_orders_total_non_negative"),
+        CheckConstraint("distance_km >= 0", name="ck_orders_distance_non_negative"),
+        CheckConstraint(
+            "status IN ('ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO')",
+            name="ck_orders_status",
+        ),
+        CheckConstraint(
+            "payment_method IS NULL OR payment_method IN ('CREDITO','DEBITO','PIX','DINHEIRO')",
+            name="ck_orders_payment_method",
+        ),
+    )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    company_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False)
-    courier_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.CREATED)
-    delivery_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
-    total_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    customer_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False, index=True)
+    company_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("companies.id"), nullable=False, index=True)
+    customer_address_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("customer_addresses.id"), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=OrderStatus.OPEN.value,
+        server_default=OrderStatus.OPEN.value,
+        index=True,
+    )
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    delivery_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    distance_km: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(50), nullable=False, default=PaymentMethod.PIX.value)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-
-class OrderItem(Base):
-    __tablename__ = "order_items"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    order_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=False)
-    product_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("products.id"), nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
-    unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    customer: Mapped["User"] = relationship(back_populates="orders")
+    company: Mapped["Company"] = relationship(back_populates="orders")
+    customer_address: Mapped["CustomerAddress"] = relationship(back_populates="orders")
+    items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
+    status_history: Mapped[list["OrderStatusHistory"]] = relationship(back_populates="order", cascade="all, delete-orphan")
+    delivery: Mapped["Delivery | None"] = relationship(back_populates="order", uselist=False, cascade="all, delete-orphan")
