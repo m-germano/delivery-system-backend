@@ -1,9 +1,7 @@
 from __future__ import annotations
-
+from app.services.route_service import calculate_distance_km
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
-
-from app.services.route_service import calculate_distance_km
 
 
 MONEY_PLACES = Decimal("0.01")
@@ -90,6 +88,9 @@ class DefaultDeliveryFeeStrategy:
     def calculate(self, distance_km: Any) -> Decimal:
         distance = _distance(distance_km)
 
+        if distance < Decimal("0"):
+            raise ValueError("A distância não pode ser negativa.")
+
         if distance <= self.included_distance_km:
             return self.minimum_fee
 
@@ -112,6 +113,9 @@ class DeliveryFeeCalculator:
         2. Caso não exista regra aplicável, usa a regra padrão.
         """
         distance = _distance(distance_km)
+
+        if distance < Decimal("0"):
+            raise ValueError("A distância não pode ser negativa.")
 
         matched_rule_fee = self._find_matching_rule_fee(company, distance)
 

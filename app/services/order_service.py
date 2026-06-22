@@ -54,7 +54,7 @@ class OrderService:
 
         if any(product.company_id != company.id for product in product_map.values()):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Todos os produtos do pedido devem pertencer à mesma empresa selecionada.",
             )
 
@@ -242,7 +242,7 @@ class OrderService:
     async def update_company_status(self, order_id: int, new_status: OrderStatus, current_user: User) -> Order:
         if new_status in {OrderStatus.ACCEPTED, OrderStatus.REJECTED}:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Use as rotas específicas de aceitar ou recusar para esta transição.",
             )
         return await self._change_company_order_status(order_id, new_status.value, current_user)
@@ -504,7 +504,7 @@ class OrderService:
 
         if missing_product_ids:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Produtos inválidos ou indisponíveis: {missing_product_ids}.",
             )
 
