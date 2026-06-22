@@ -127,7 +127,7 @@ class DeliveryService:
 
         if not DeliveryCodeService.is_valid_code(delivery, confirmation_code):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Código de confirmação inválido. Peça o código de 4 dígitos ao cliente.",
             )
 
@@ -160,7 +160,7 @@ class DeliveryService:
     async def update_status(self, delivery_id: int, new_status: DeliveryStatus, current_user: User) -> Delivery:
         self._ensure_courier(current_user)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Use a rota de finalizar entrega informando o código de 4 dígitos do cliente.",
         )
 
@@ -169,7 +169,7 @@ class DeliveryService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido não encontrado.")
 
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A entrega deve ser finalizada pelo entregador usando o código de 4 dígitos exibido para o cliente.",
         )
 
