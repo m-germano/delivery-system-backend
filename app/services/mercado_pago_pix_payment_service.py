@@ -154,6 +154,53 @@ class MercadoPagoPixPaymentService:
         )
         return order
 
+    async def handle_order_rejected_by_company(self, order: Order) -> str:
+        """Cancela/reembolsa pagamento online quando a loja recusa o pedido.
+
+        Retorna um marcador simples para a camada de pedidos ajustar mensagens.
+        """
+        payment = await self.payment_repository.get_latest_pix_by_order(order.id)
+        if payment is None or order.payment_method != "PIX_ONLINE":
+            return "not_online"
+
+        if payment.provider != PaymentProvider.MERCADO_PAGO.value:
+            return "not_mercado_pago"
+
+        if payment.status == PaymentStatus.REFUNDED.value:
+            logger.info(
+                "Pagamento já reembolsado ao recusar pedido. order_id=%s provider_payment_id=%s status=%s",
+                order.id,
+                payment.provider_payment_id,
+                payment.status,
+            )
+            return "already_refunded"
+
+        if payment.status in PAYMENT_PENDING_STATUSES:
+            await self._cancel_pending_payment_for_rejected_order(payment)
+            return "cancelled_pending"
+
+        if payment.status != PaymentStatus.APPROVED.value:
+            return "not_approved"
+
+        if not payment.provider_payment_id:
+            logger.warning("Pagamento aprovado sem provider_payment_id para reembolso. order_id=%s payment_id=%s", order.id, payment.id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pedido pago online, mas não possui identificador do Mercado Pago para reembolso.",
+            )
+
+        account = await self._get_active_account_or_409(payment.company_id)
+        refund_data = await self._refund_mercado_pago_payment(account, payment.provider_payment_id)
+        self._apply_refund_payload(payment, refund_data)
+        await self.session.flush()
+        logger.info(
+            "Pagamento reembolsado ao recusar pedido. order_id=%s provider_payment_id=%s refund_status=%s",
+            order.id,
+            payment.provider_payment_id,
+            payment.provider_status,
+        )
+        return "refunded"
+
     async def process_mercado_pago_webhook(self, payload: dict) -> None:
         provider_payment_id = self._extract_provider_payment_id(payload)
         if not provider_payment_id:
@@ -336,6 +383,52 @@ class MercadoPagoPixPaymentService:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Não foi possível cancelar pagamento no Mercado Pago.")
         return response.json()
 
+    async def _refund_mercado_pago_payment(self, account: CompanyPaymentAccount, provider_payment_id: str) -> dict:
+        access_token = decrypt_secret(account.access_token_encrypted)
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        endpoint = f"{settings.MERCADO_PAGO_PAYMENTS_URL}/{provider_payment_id}/refunds"
+        logger.info(
+            "Solicitando reembolso Mercado Pago. order_provider_payment_id=%s endpoint=%s",
+            provider_payment_id,
+            endpoint,
+        )
+        async with httpx.AsyncClient(timeout=settings.EXTERNAL_API_TIMEOUT_SECONDS) as client:
+            response = await client.post(endpoint, json={}, headers=headers)
+        if response.is_error:
+            logger.warning(
+                "Erro ao reembolsar pagamento Mercado Pago. provider_payment_id=%s status_code=%s body=%s",
+                provider_payment_id,
+                response.status_code,
+                self._safe_response_body(response),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Não foi possível processar o reembolso no Mercado Pago. Tente novamente antes de recusar o pedido.",
+            )
+        return response.json()
+
+    async def _cancel_pending_payment_for_rejected_order(self, payment: Payment) -> None:
+        if payment.provider_payment_id:
+            account = await self._get_active_account_or_409(payment.company_id)
+            try:
+                response_data = await self._cancel_mercado_pago_payment(account, payment.provider_payment_id)
+                self._apply_provider_payload(payment, response_data)
+            except HTTPException:
+                logger.warning(
+                    "Falha ao cancelar Pix pendente durante recusa. payment_id=%s provider_payment_id=%s",
+                    payment.id,
+                    payment.provider_payment_id,
+                )
+                raise
+
+        if payment.status in PAYMENT_PENDING_STATUSES:
+            now = datetime.utcnow()
+            payment.status = PaymentStatus.CANCELLED.value
+            payment.provider_status = payment.provider_status or PaymentStatus.CANCELLED.value
+            payment.raw_status = payment.raw_status or payment.provider_status
+            payment.cancelled_at = payment.cancelled_at or now
+        await self.session.flush()
+
     def _apply_provider_payload(self, payment: Payment, response_data: dict, *, can_apply_approval: bool = True) -> None:
         provider_status = str(response_data.get("status") or "")
         provider_status_detail = response_data.get("status_detail")
@@ -372,6 +465,20 @@ class MercadoPagoPixPaymentService:
         elif provider_status_detail in MERCADO_PAGO_EXPIRED_STATUS_DETAILS:
             payment.status = PaymentStatus.EXPIRED.value
             payment.failed_at = payment.failed_at or now
+
+    def _apply_refund_payload(self, payment: Payment, refund_data: dict) -> None:
+        now = datetime.utcnow()
+        refund_status = str(refund_data.get("status") or "refunded")
+        payment.status = PaymentStatus.REFUNDED.value
+        payment.provider_status = refund_status
+        payment.provider_status_detail = str(refund_data.get("status_detail")) if refund_data.get("status_detail") is not None else None
+        payment.raw_status = payment.provider_status
+        payment.raw_status_detail = payment.provider_status_detail
+        payment.raw_response = {
+            **(payment.raw_response if isinstance(payment.raw_response, dict) else {}),
+            "refund": _sanitize_for_log(refund_data),
+        }
+        payment.refunded_at = payment.refunded_at or now
 
     async def _apply_order_status_from_payment(self, order: Order, payment: Payment) -> None:
         if payment.status == PaymentStatus.APPROVED.value and order.status == OrderStatus.PENDING_PAYMENT.value:

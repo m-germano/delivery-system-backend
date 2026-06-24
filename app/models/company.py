@@ -22,3 +22,8 @@ class Company(TimestampMixin, Base):
     products: Mapped[list["Product"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     fee_rules: Mapped[list["DeliveryFeeRule"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     orders: Mapped[list["Order"]] = relationship(back_populates="company")
+    order_settings: Mapped["CompanyOrderSettings | None"] = relationship(
+        back_populates="company",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )

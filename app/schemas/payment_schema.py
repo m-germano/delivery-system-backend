@@ -70,6 +70,7 @@ class PaymentResponse(BaseModel):
     expires_at: datetime | None = None
     paid_at: datetime | None = None
     cancelled_at: datetime | None = None
+    refunded_at: datetime | None = None
     failed_at: datetime | None = None
     provider_status: str | None = None
     provider_status_detail: str | None = None

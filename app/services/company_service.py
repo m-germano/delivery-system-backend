@@ -1,7 +1,7 @@
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Company, CompanyAddress, User
+from app.models import Company, CompanyAddress, CompanyOrderSettings, User
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.customer_address_repository import CustomerAddressRepository
 from app.schemas.company_schema import (
@@ -142,6 +142,7 @@ class CompanyService:
                 longitude=completed_address.longitude,
             )
         )
+        self.session.add(CompanyOrderSettings(company_id=company.id))
 
         await self.session.commit()
 

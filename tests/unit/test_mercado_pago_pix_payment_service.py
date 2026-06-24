@@ -73,6 +73,29 @@ class FakeOrderRepository:
         return None
 
 
+def make_payment_for_refund(status_value=PaymentStatus.APPROVED.value):
+    return SimpleNamespace(
+        id=1,
+        order_id=10,
+        company_id=1,
+        provider="mercado_pago",
+        status=status_value,
+        provider_payment_id="123456",
+        provider_order_id=None,
+        provider_status=status_value,
+        provider_status_detail=None,
+        raw_status=status_value,
+        raw_status_detail=None,
+        raw_response=None,
+        qr_code=None,
+        qr_code_base64=None,
+        paid_at=None,
+        refunded_at=None,
+        cancelled_at=None,
+        failed_at=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_pix_unavailable_when_company_has_no_active_mercado_pago_account():
     service = MercadoPagoPixPaymentService(FakeSession())
@@ -540,3 +563,143 @@ async def test_cannot_cancel_approved_pix_payment():
 
     with pytest.raises(HTTPException, match="Pagamento aprovado"):
         await service.cancel_pending_pix_payment(order, current_user)
+
+
+@pytest.mark.asyncio
+async def test_rejecting_approved_pix_payment_refunds_payment(monkeypatch):
+    order = SimpleNamespace(id=10, company_id=1, payment_method=PaymentMethod.PIX_ONLINE.value)
+    payment = make_payment_for_refund(PaymentStatus.APPROVED.value)
+    account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
+    captured = {"refund_calls": 0}
+
+    service = MercadoPagoPixPaymentService(FakeSession())
+    service.payment_repository = FakePaymentRepository(latest_payment=payment)
+    service.account_repository = FakeAccountRepository(account)
+
+    async def fake_refund(account, provider_payment_id):
+        captured["refund_calls"] += 1
+        assert provider_payment_id == "123456"
+        return {"id": "refund-1", "status": "approved"}
+
+    monkeypatch.setattr(service, "_refund_mercado_pago_payment", fake_refund)
+
+    result = await service.handle_order_rejected_by_company(order)
+
+    assert result == "refunded"
+    assert captured["refund_calls"] == 1
+    assert payment.status == PaymentStatus.REFUNDED.value
+    assert payment.provider_status == "approved"
+    assert payment.refunded_at is not None
+    assert payment.raw_response["refund"]["id"] == "refund-1"
+
+
+@pytest.mark.asyncio
+async def test_rejecting_already_refunded_pix_payment_is_idempotent(monkeypatch):
+    order = SimpleNamespace(id=10, company_id=1, payment_method=PaymentMethod.PIX_ONLINE.value)
+    payment = make_payment_for_refund(PaymentStatus.REFUNDED.value)
+    captured = {"refund_calls": 0}
+
+    service = MercadoPagoPixPaymentService(FakeSession())
+    service.payment_repository = FakePaymentRepository(latest_payment=payment)
+
+    async def fake_refund(account, provider_payment_id):
+        captured["refund_calls"] += 1
+        return {"id": "refund-1", "status": "approved"}
+
+    monkeypatch.setattr(service, "_refund_mercado_pago_payment", fake_refund)
+
+    result = await service.handle_order_rejected_by_company(order)
+
+    assert result == "already_refunded"
+    assert captured["refund_calls"] == 0
+    assert payment.status == PaymentStatus.REFUNDED.value
+
+
+@pytest.mark.asyncio
+async def test_rejecting_pending_pix_payment_cancels_without_refund(monkeypatch):
+    order = SimpleNamespace(id=10, company_id=1, payment_method=PaymentMethod.PIX_ONLINE.value)
+    payment = make_payment_for_refund(PaymentStatus.PENDING.value)
+    account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
+    captured = {"refund_calls": 0, "cancel_calls": 0}
+
+    service = MercadoPagoPixPaymentService(FakeSession())
+    service.payment_repository = FakePaymentRepository(latest_payment=payment)
+    service.account_repository = FakeAccountRepository(account)
+
+    async def fake_refund(account, provider_payment_id):
+        captured["refund_calls"] += 1
+        return {"id": "refund-1", "status": "approved"}
+
+    async def fake_cancel(account, provider_payment_id):
+        captured["cancel_calls"] += 1
+        return {"id": provider_payment_id, "status": "cancelled"}
+
+    monkeypatch.setattr(service, "_refund_mercado_pago_payment", fake_refund)
+    monkeypatch.setattr(service, "_cancel_mercado_pago_payment", fake_cancel)
+
+    result = await service.handle_order_rejected_by_company(order)
+
+    assert result == "cancelled_pending"
+    assert captured["refund_calls"] == 0
+    assert captured["cancel_calls"] == 1
+    assert payment.status == PaymentStatus.CANCELLED.value
+    assert payment.refunded_at is None
+
+
+@pytest.mark.asyncio
+async def test_failed_refund_does_not_mark_payment_as_refunded(monkeypatch):
+    order = SimpleNamespace(id=10, company_id=1, payment_method=PaymentMethod.PIX_ONLINE.value)
+    payment = make_payment_for_refund(PaymentStatus.APPROVED.value)
+    account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
+
+    service = MercadoPagoPixPaymentService(FakeSession())
+    service.payment_repository = FakePaymentRepository(latest_payment=payment)
+    service.account_repository = FakeAccountRepository(account)
+
+    async def fake_refund(account, provider_payment_id):
+        raise HTTPException(status_code=502, detail="Falha de reembolso")
+
+    monkeypatch.setattr(service, "_refund_mercado_pago_payment", fake_refund)
+
+    with pytest.raises(HTTPException, match="Falha de reembolso"):
+        await service.handle_order_rejected_by_company(order)
+
+    assert payment.status == PaymentStatus.APPROVED.value
+    assert payment.refunded_at is None
+
+
+@pytest.mark.asyncio
+async def test_rejecting_non_online_order_does_not_call_mercado_pago(monkeypatch):
+    current_user = SimpleNamespace(id=99, role_id=RoleId.COMPANY)
+    order = SimpleNamespace(
+        id=10,
+        company_id=1,
+        customer_user_id=7,
+        status=OrderStatus.OPEN.value,
+        payment_method=PaymentMethod.PIX.value,
+    )
+    company = SimpleNamespace(id=1)
+    captured = {"changed": False}
+
+    service = OrderService(FakeSession())
+
+    async def fake_get_order_or_404(order_id):
+        return order
+
+    async def fake_get_by_owner_user_id(user_id):
+        return company
+
+    async def fake_change(order_id, new_status, user):
+        captured["changed"] = True
+        assert new_status == OrderStatus.REJECTED.value
+        order.status = new_status
+        return order
+
+    monkeypatch.setattr(service, "_get_order_or_404", fake_get_order_or_404)
+    monkeypatch.setattr(service.company_repository, "get_by_owner_user_id", fake_get_by_owner_user_id)
+    monkeypatch.setattr(service, "_change_company_order_status", fake_change)
+
+    rejected_order = await service.reject_order(order.id, current_user)
+
+    assert captured["changed"] is True
+    assert rejected_order.status == OrderStatus.REJECTED.value

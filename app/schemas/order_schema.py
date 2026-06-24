@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.enums import OrderStatus, PaymentMethod
+from app.core.enums import FulfillmentType, OrderStatus, PaymentMethod
 from app.schemas.company_schema import CompanyAddressResponse
 from app.schemas.customer_address_schema import CustomerAddressResponse
 
@@ -25,6 +25,7 @@ class OrderItemCreateRequest(BaseModel):
 class OrderCreateRequest(BaseModel):
     company_id: int = Field(gt=0)
     customer_address_id: int | None = Field(default=None, gt=0)
+    fulfillment_type: FulfillmentType = FulfillmentType.DELIVERY
     items: list[OrderItemCreateRequest] = Field(min_length=1)
     payment_method: PaymentMethod = PaymentMethod.PIX
     notes: str | None = Field(default=None, max_length=1000)
@@ -47,6 +48,7 @@ class OrderCreateRequest(BaseModel):
 
 class OrderStatusUpdateRequest(BaseModel):
     status: OrderStatus
+    confirmation_code: str | None = Field(default=None, min_length=4, max_length=20)
 
 
 class OrderItemResponse(BaseModel):
@@ -87,9 +89,12 @@ class OrderResponse(BaseModel):
     id: int
     customer_user_id: int
     company_id: int
-    customer_address_id: int
+    customer_address_id: int | None = None
+    fulfillment_type: str
     status: str
     subtotal: Decimal
+    discount_amount: Decimal
+    pickup_discount_percent: Decimal
     delivery_fee: Decimal
     total: Decimal
     distance_km: Decimal
@@ -102,6 +107,7 @@ class OrderResponse(BaseModel):
     company: OrderCompanySummaryResponse | None = None
     customer_address: CustomerAddressResponse | None = None
     delivery_confirmation_code: str | None = None
+    pickup_confirmation_code: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -121,9 +127,13 @@ class OrderCalculationItemResponse(BaseModel):
 
 class OrderCalculationResponse(BaseModel):
     company_id: int
-    customer_address_id: int
+    customer_address_id: int | None = None
+    fulfillment_type: str
     distance_km: Decimal
     subtotal: Decimal
+    discount_amount: Decimal
+    pickup_discount_percent: Decimal
+    minimum_order_value: Decimal
     delivery_fee: Decimal
     total: Decimal
     items: list[OrderCalculationItemResponse]

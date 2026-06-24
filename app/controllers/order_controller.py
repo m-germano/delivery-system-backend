@@ -193,4 +193,9 @@ async def update_order_status(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles(RoleId.COMPANY)),
 ):
-    return await OrderService(db).update_company_status(order_id, data.status, current_user)
+    return await OrderService(db).update_company_status(
+        order_id,
+        data.status,
+        current_user,
+        confirmation_code=data.confirmation_code,
+    )

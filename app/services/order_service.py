@@ -3,8 +3,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import DeliveryStatus, OrderStatus, PaymentMethod, RoleId
+from app.core.enums import DeliveryStatus, FulfillmentType, OrderStatus, PaymentMethod, RoleId
 from app.models import Delivery, DeliveryStatusHistory, Order, OrderItem, OrderStatusHistory, User
+from app.repositories.company_order_settings_repository import CompanyOrderSettingsRepository
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.customer_address_repository import CustomerAddressRepository
 from app.repositories.order_repository import OrderRepository
@@ -14,7 +15,7 @@ from app.schemas.order_schema import (
     OrderCreateRequest,
 )
 from app.schemas.payment_schema import PixOrderCreateResponse
-from app.services.delivery_code_service import DeliveryCodeService
+from app.services.delivery_code_service import DeliveryCodeService, PickupCodeService
 from app.services.delivery_fee_service import DeliveryFeeCalculator
 from app.services.route_service import RouteDistanceService
 from app.services.realtime_service import (
@@ -25,16 +26,24 @@ from app.services.realtime_service import (
 
 TERMINAL_ORDER_STATUSES = {
     OrderStatus.DELIVERED.value,
+    OrderStatus.PICKED_UP.value,
     OrderStatus.CANCELED.value,
     OrderStatus.REJECTED.value,
 }
 
-COMPANY_STATUS_FLOW = {
+DELIVERY_COMPANY_STATUS_FLOW = {
     OrderStatus.OPEN.value: {OrderStatus.ACCEPTED.value, OrderStatus.REJECTED.value, OrderStatus.CANCELED.value},
     OrderStatus.ACCEPTED.value: {OrderStatus.IN_PREPARATION.value, OrderStatus.CANCELED.value},
     OrderStatus.IN_PREPARATION.value: {OrderStatus.WAITING_COURIER.value, OrderStatus.CANCELED.value},
     OrderStatus.WAITING_COURIER.value: {OrderStatus.CANCELED.value},
     OrderStatus.OUT_FOR_DELIVERY.value: {OrderStatus.CANCELED.value},
+}
+
+PICKUP_COMPANY_STATUS_FLOW = {
+    OrderStatus.OPEN.value: {OrderStatus.ACCEPTED.value, OrderStatus.REJECTED.value, OrderStatus.CANCELED.value},
+    OrderStatus.ACCEPTED.value: {OrderStatus.IN_PREPARATION.value, OrderStatus.CANCELED.value},
+    OrderStatus.IN_PREPARATION.value: {OrderStatus.READY_FOR_PICKUP.value, OrderStatus.CANCELED.value},
+    OrderStatus.READY_FOR_PICKUP.value: {OrderStatus.PICKED_UP.value, OrderStatus.CANCELED.value},
 }
 
 
@@ -43,6 +52,7 @@ class OrderService:
         self.session = session
         self.order_repository = OrderRepository(session)
         self.company_repository = CompanyRepository(session)
+        self.company_order_settings_repository = CompanyOrderSettingsRepository(session)
         self.customer_address_repository = CustomerAddressRepository(session)
         self.delivery_fee_calculator = DeliveryFeeCalculator()
         self.route_distance_service = RouteDistanceService()
@@ -50,7 +60,7 @@ class OrderService:
     async def calculate_order(self, data: OrderCreateRequest, current_user: User) -> OrderCalculationResponse:
         self._ensure_customer(current_user)
         company = await self._get_active_company_with_location(data.company_id)
-        customer_address = await self._get_customer_address_for_order(data.customer_address_id, current_user.id)
+        order_settings = await self.company_order_settings_repository.get_or_create_default(company.id)
         product_map = await self._get_products_for_order(data)
 
         if any(product.company_id != company.id for product in product_map.values()):
@@ -58,15 +68,6 @@ class OrderService:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Todos os produtos do pedido devem pertencer à mesma empresa selecionada.",
             )
-
-        route_distance = await self.route_distance_service.get_delivery_distance(
-            origin_latitude=company.address.latitude,
-            origin_longitude=company.address.longitude,
-            destination_latitude=customer_address.latitude,
-            destination_longitude=customer_address.longitude,
-        )
-        distance_km = route_distance.distance_km
-        delivery_fee = self.delivery_fee_calculator.calculate_for_company(company, distance_km)
 
         subtotal = Decimal("0.00")
         items: list[OrderCalculationItemResponse] = []
@@ -85,13 +86,62 @@ class OrderService:
             )
 
         subtotal = subtotal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        minimum_order_value = Decimal(order_settings.minimum_order_value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if subtotal < minimum_order_value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Pedido mínimo desta empresa é de R$ {minimum_order_value}.",
+            )
+
+        if data.fulfillment_type == FulfillmentType.PICKUP:
+            if not order_settings.accepts_pickup:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Esta empresa não aceita retirada na loja.")
+
+            pickup_discount_percent = Decimal(order_settings.pickup_discount_percent).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            discount_amount = (subtotal * pickup_discount_percent / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            delivery_fee = Decimal("0.00")
+            distance_km = Decimal("0.00")
+            total = (subtotal - discount_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            return OrderCalculationResponse(
+                company_id=company.id,
+                customer_address_id=None,
+                fulfillment_type=FulfillmentType.PICKUP.value,
+                distance_km=distance_km,
+                subtotal=subtotal,
+                discount_amount=discount_amount,
+                pickup_discount_percent=pickup_discount_percent,
+                minimum_order_value=minimum_order_value,
+                delivery_fee=delivery_fee,
+                total=total,
+                items=items,
+            )
+
+        if not order_settings.accepts_delivery:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Esta empresa não aceita delivery.")
+
+        customer_address = await self._get_customer_address_for_order(data.customer_address_id, current_user.id)
+        route_distance = await self.route_distance_service.get_delivery_distance(
+            origin_latitude=company.address.latitude,
+            origin_longitude=company.address.longitude,
+            destination_latitude=customer_address.latitude,
+            destination_longitude=customer_address.longitude,
+        )
+        distance_km = route_distance.distance_km
+        delivery_fee = self.delivery_fee_calculator.calculate_for_company(company, distance_km)
+        discount_amount = Decimal("0.00")
+        pickup_discount_percent = Decimal("0.00")
         total = (subtotal + delivery_fee).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         return OrderCalculationResponse(
             company_id=company.id,
             customer_address_id=customer_address.id,
+            fulfillment_type=FulfillmentType.DELIVERY.value,
             distance_km=distance_km,
             subtotal=subtotal,
+            discount_amount=discount_amount,
+            pickup_discount_percent=pickup_discount_percent,
+            minimum_order_value=minimum_order_value,
             delivery_fee=delivery_fee,
             total=total,
             items=items,
@@ -149,8 +199,11 @@ class OrderService:
             customer_user_id=current_user.id,
             company_id=calculation.company_id,
             customer_address_id=calculation.customer_address_id,
+            fulfillment_type=calculation.fulfillment_type,
             status=initial_status,
             subtotal=calculation.subtotal,
+            discount_amount=calculation.discount_amount,
+            pickup_discount_percent=calculation.pickup_discount_percent,
             delivery_fee=calculation.delivery_fee,
             total=calculation.total,
             distance_km=calculation.distance_km,
@@ -211,6 +264,30 @@ class OrderService:
         return await self._change_company_order_status(order_id, OrderStatus.ACCEPTED.value, current_user)
 
     async def reject_order(self, order_id: int, current_user: User) -> Order:
+        self._ensure_company(current_user)
+        order = await self._get_order_or_404(order_id)
+        company = await self.company_repository.get_by_owner_user_id(current_user.id)
+
+        if company is None or order.company_id != company.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido não encontrado.")
+
+        if order.status == OrderStatus.REJECTED.value:
+            return await self._get_visible_order(order.id, current_user)
+
+        if order.payment_method == PaymentMethod.PIX_ONLINE.value:
+            from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
+
+            try:
+                refund_result = await MercadoPagoPixPaymentService(self.session).handle_order_rejected_by_company(order)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Pedido pago online, mas houve problema ao processar o reembolso. Tente novamente.",
+                )
+            setattr(order, "refund_result", refund_result)
+
         return await self._change_company_order_status(order_id, OrderStatus.REJECTED.value, current_user)
 
     async def cancel_order_by_company(self, order_id: int, current_user: User) -> Order:
@@ -272,13 +349,24 @@ class OrderService:
 
         return await self._get_visible_order(order.id, current_user)
 
-    async def update_company_status(self, order_id: int, new_status: OrderStatus, current_user: User) -> Order:
+    async def update_company_status(
+        self,
+        order_id: int,
+        new_status: OrderStatus,
+        current_user: User,
+        confirmation_code: str | None = None,
+    ) -> Order:
         if new_status in {OrderStatus.ACCEPTED, OrderStatus.REJECTED}:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Use as rotas específicas de aceitar ou recusar para esta transição.",
             )
-        return await self._change_company_order_status(order_id, new_status.value, current_user)
+        return await self._change_company_order_status(
+            order_id,
+            new_status.value,
+            current_user,
+            confirmation_code=confirmation_code,
+        )
 
     async def _change_company_order_status(
         self,
@@ -287,6 +375,7 @@ class OrderService:
         current_user: User,
         *,
         company_cancel: bool = False,
+        confirmation_code: str | None = None,
     ) -> Order:
         self._ensure_company(current_user)
         order = await self._get_order_or_404(order_id)
@@ -328,12 +417,16 @@ class OrderService:
             await self._broadcast_tracking_snapshot(order.id, "ORDER_STATUS_UPDATED")
             return await self._get_visible_order(order.id, current_user)
 
-        allowed_statuses = COMPANY_STATUS_FLOW.get(order.status, set())
+        status_flow = PICKUP_COMPANY_STATUS_FLOW if order.fulfillment_type == FulfillmentType.PICKUP.value else DELIVERY_COMPANY_STATUS_FLOW
+        allowed_statuses = status_flow.get(order.status, set())
         if new_status not in allowed_statuses:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Transição inválida: {order.status} -> {new_status}.",
             )
+
+        if order.fulfillment_type == FulfillmentType.PICKUP.value and new_status == OrderStatus.PICKED_UP.value:
+            self._validate_pickup_confirmation(order, confirmation_code)
 
         await self._apply_order_status(order, new_status, current_user.id)
 
@@ -410,6 +503,12 @@ class OrderService:
         await self.session.flush()
 
     async def _create_delivery_if_missing(self, order: Order, changed_by_user_id: int) -> Delivery | None:
+        if order.fulfillment_type != FulfillmentType.DELIVERY.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pedidos de retirada não podem ser enviados para entregador.",
+            )
+
         if order.delivery is not None:
             return None
 
@@ -441,6 +540,20 @@ class OrderService:
         )
 
         return delivery
+
+    @staticmethod
+    def _validate_pickup_confirmation(order: Order, confirmation_code: str | None) -> None:
+        if order.fulfillment_type != FulfillmentType.PICKUP.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedido não é de retirada.")
+
+        if order.status == OrderStatus.PICKED_UP.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedido já foi retirado.")
+
+        if order.status != OrderStatus.READY_FOR_PICKUP.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedido não está pronto para retirada.")
+
+        if not PickupCodeService.is_valid_code(order, confirmation_code):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Código de retirada inválido.")
 
     async def _cancel_delivery_if_exists(self, order: Order, changed_by_user_id: int) -> Delivery | None:
         if order.delivery is None or order.delivery.status in {DeliveryStatus.FINISHED.value, DeliveryStatus.CANCELED.value}:
@@ -484,12 +597,17 @@ class OrderService:
 
     @staticmethod
     def _attach_customer_delivery_code(order: Order) -> None:
-        code = None
+        delivery_code = None
+        pickup_code = None
 
         if order.status == OrderStatus.OUT_FOR_DELIVERY.value and order.delivery is not None:
-            code = DeliveryCodeService.generate_code(order.delivery)
+            delivery_code = DeliveryCodeService.generate_code(order.delivery)
 
-        setattr(order, "delivery_confirmation_code", code)
+        if order.fulfillment_type == FulfillmentType.PICKUP.value and order.status == OrderStatus.READY_FOR_PICKUP.value:
+            pickup_code = PickupCodeService.generate_code(order)
+
+        setattr(order, "delivery_confirmation_code", delivery_code)
+        setattr(order, "pickup_confirmation_code", pickup_code)
 
     async def _get_order_or_404(self, order_id: int) -> Order:
         order = await self.order_repository.get_by_id(order_id)

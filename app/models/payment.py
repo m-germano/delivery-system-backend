@@ -42,6 +42,7 @@ class Payment(TimestampMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     provider_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
     provider_status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)

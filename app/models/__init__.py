@@ -2,6 +2,7 @@ from app.models.role import Role
 from app.models.user import User
 from app.models.company import Company
 from app.models.company_address import CompanyAddress
+from app.models.company_order_settings import CompanyOrderSettings
 from app.models.product_category import ProductCategory
 from app.models.product import Product
 from app.models.customer_address import CustomerAddress
@@ -21,6 +22,7 @@ __all__ = [
     "User",
     "Company",
     "CompanyAddress",
+    "CompanyOrderSettings",
     "ProductCategory",
     "Product",
     "CustomerAddress",
