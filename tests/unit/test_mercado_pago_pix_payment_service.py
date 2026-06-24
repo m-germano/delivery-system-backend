@@ -703,3 +703,141 @@ async def test_rejecting_non_online_order_does_not_call_mercado_pago(monkeypatch
 
     assert captured["changed"] is True
     assert rejected_order.status == OrderStatus.REJECTED.value
+
+
+def make_company_order(status_value=OrderStatus.ACCEPTED.value, payment_method=PaymentMethod.PIX.value):
+    return SimpleNamespace(
+        id=10,
+        company_id=1,
+        customer_user_id=7,
+        status=status_value,
+        payment_method=payment_method,
+        delivery=None,
+    )
+
+
+async def _noop_publish(*args, **kwargs):
+    return None
+
+
+def prepare_company_order_service(monkeypatch, order):
+    current_user = SimpleNamespace(id=99, role_id=RoleId.COMPANY)
+    company = SimpleNamespace(id=1)
+    service = OrderService(FakeSession())
+
+    async def fake_get_order_or_404(order_id):
+        return order
+
+    async def fake_get_by_owner_user_id(user_id):
+        return company
+
+    async def fake_get_visible_order(order_id, user):
+        return order
+
+    async def fake_broadcast(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_get_order_or_404", fake_get_order_or_404)
+    monkeypatch.setattr(service.company_repository, "get_by_owner_user_id", fake_get_by_owner_user_id)
+    monkeypatch.setattr(service, "_get_visible_order", fake_get_visible_order)
+    monkeypatch.setattr(service, "_broadcast_tracking_snapshot", fake_broadcast)
+    monkeypatch.setattr("app.services.order_service.publish_company_order_event", _noop_publish)
+    monkeypatch.setattr("app.services.order_service.publish_courier_delivery_event", _noop_publish)
+
+    return service, current_user
+
+
+@pytest.mark.asyncio
+async def test_company_cannot_cancel_order_before_accepting(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.OPEN.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.cancel_order_by_company(order.id, current_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Pedido ainda não foi aceito. Use a opção de recusar."
+
+
+@pytest.mark.asyncio
+async def test_company_cannot_reject_already_accepted_order(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.ACCEPTED.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.reject_order(order.id, current_user)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Pedido já foi aceito. Use a opção de cancelar."
+
+
+@pytest.mark.asyncio
+async def test_company_can_cancel_accepted_order_without_online_payment(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.ACCEPTED.value, payment_method=PaymentMethod.PIX.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+    captured = {"refund_calls": 0}
+
+    async def fake_refund(self, order):
+        captured["refund_calls"] += 1
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "handle_order_cancelled_by_company", fake_refund)
+
+    cancelled_order = await service.cancel_order_by_company(order.id, current_user)
+
+    assert cancelled_order.status == OrderStatus.CANCELED.value
+    assert captured["refund_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_company_cancel_accepted_pix_online_calls_refund(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.ACCEPTED.value, payment_method=PaymentMethod.PIX_ONLINE.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+    captured = {"refund_calls": 0}
+
+    async def fake_refund(self, received_order):
+        captured["refund_calls"] += 1
+        assert received_order is order
+        return "refunded"
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "handle_order_cancelled_by_company", fake_refund)
+
+    cancelled_order = await service.cancel_order_by_company(order.id, current_user)
+
+    assert cancelled_order.status == OrderStatus.CANCELED.value
+    assert getattr(cancelled_order, "refund_result") == "refunded"
+    assert captured["refund_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_company_cancel_refund_failure_does_not_cancel_order(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.ACCEPTED.value, payment_method=PaymentMethod.PIX_ONLINE.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+
+    async def fake_refund(self, received_order):
+        raise HTTPException(status_code=502, detail="Falha de reembolso")
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "handle_order_cancelled_by_company", fake_refund)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.cancel_order_by_company(order.id, current_user)
+
+    assert exc_info.value.status_code == 502
+    assert order.status == OrderStatus.ACCEPTED.value
+
+
+@pytest.mark.asyncio
+async def test_company_cancel_twice_does_not_refund_again(monkeypatch):
+    order = make_company_order(status_value=OrderStatus.CANCELED.value, payment_method=PaymentMethod.PIX_ONLINE.value)
+    service, current_user = prepare_company_order_service(monkeypatch, order)
+    captured = {"refund_calls": 0}
+
+    async def fake_refund(self, received_order):
+        captured["refund_calls"] += 1
+        return "refunded"
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "handle_order_cancelled_by_company", fake_refund)
+
+    cancelled_order = await service.cancel_order_by_company(order.id, current_user)
+
+    assert cancelled_order.status == OrderStatus.CANCELED.value
+    assert captured["refund_calls"] == 0

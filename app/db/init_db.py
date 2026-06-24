@@ -14,6 +14,7 @@ from app.models import (  # noqa: F401 - garante registro dos models no metadata
     DeliveryFeeRule,
     DeliveryStatusHistory,
     CompanyPaymentAccount,
+    CompanyReview,
     Order,
     OrderItem,
     OrderStatusHistory,
@@ -42,6 +43,7 @@ REQUIRED_TABLES = {
     "deliveries",
     "delivery_status_history",
     "company_payment_accounts",
+    "company_reviews",
     "payments",
     "payment_oauth_states",
 }
@@ -202,6 +204,29 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
                     """
                 )
             )
+
+    if {"companies", "users", "orders"}.issubset(existing_tables):
+        async with db_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS company_reviews (
+                        id BIGSERIAL PRIMARY KEY,
+                        company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                        customer_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        order_id BIGINT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+                        rating INTEGER NOT NULL,
+                        comment TEXT,
+                        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        CONSTRAINT ck_company_reviews_rating_range CHECK (rating >= 1 AND rating <= 5)
+                    )
+                    """
+                )
+            )
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_company_id ON company_reviews(company_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_customer_user_id ON company_reviews(customer_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_order_id ON company_reviews(order_id)"))
 
     if "payments" in existing_tables:
         async with db_engine.begin() as conn:

@@ -16,6 +16,7 @@ from app.models.delivery_status_history import DeliveryStatusHistory
 from app.models.company_payment_account import CompanyPaymentAccount
 from app.models.payment import Payment
 from app.models.payment_oauth_state import PaymentOAuthState
+from app.models.company_review import CompanyReview
 
 __all__ = [
     "Role",
@@ -36,4 +37,5 @@ __all__ = [
     "CompanyPaymentAccount",
     "Payment",
     "PaymentOAuthState",
+    "CompanyReview",
 ]

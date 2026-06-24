@@ -20,3 +20,4 @@ class User(TimestampMixin, Base):
     courier: Mapped["Courier | None"] = relationship(back_populates="user", uselist=False)
     customer_addresses: Mapped[list["CustomerAddress"]] = relationship(back_populates="user")
     orders: Mapped[list["Order"]] = relationship(back_populates="customer")
+    company_reviews: Mapped[list["CompanyReview"]] = relationship(back_populates="customer")

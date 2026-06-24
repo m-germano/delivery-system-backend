@@ -19,6 +19,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .where(Order.id == order_id)
         )
@@ -35,6 +36,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .where(base_filters)
             .order_by(Order.created_at.desc(), Order.id.desc())
@@ -54,6 +56,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .where(*base_filters)
             .order_by(Order.created_at.desc(), Order.id.desc())
@@ -72,6 +75,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .order_by(Order.created_at.desc(), Order.id.desc())
             .limit(limit)

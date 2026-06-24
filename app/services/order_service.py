@@ -7,6 +7,7 @@ from app.core.enums import DeliveryStatus, FulfillmentType, OrderStatus, Payment
 from app.models import Delivery, DeliveryStatusHistory, Order, OrderItem, OrderStatusHistory, User
 from app.repositories.company_order_settings_repository import CompanyOrderSettingsRepository
 from app.repositories.company_repository import CompanyRepository
+from app.repositories.company_review_repository import CompanyReviewRepository
 from app.repositories.customer_address_repository import CustomerAddressRepository
 from app.repositories.order_repository import OrderRepository
 from app.schemas.order_schema import (
@@ -31,6 +32,14 @@ TERMINAL_ORDER_STATUSES = {
     OrderStatus.REJECTED.value,
 }
 
+CANCELABLE_BY_COMPANY_STATUSES = {
+    OrderStatus.ACCEPTED.value,
+    OrderStatus.IN_PREPARATION.value,
+    OrderStatus.READY_FOR_PICKUP.value,
+    OrderStatus.WAITING_COURIER.value,
+    OrderStatus.OUT_FOR_DELIVERY.value,
+}
+
 DELIVERY_COMPANY_STATUS_FLOW = {
     OrderStatus.OPEN.value: {OrderStatus.ACCEPTED.value, OrderStatus.REJECTED.value, OrderStatus.CANCELED.value},
     OrderStatus.ACCEPTED.value: {OrderStatus.IN_PREPARATION.value, OrderStatus.CANCELED.value},
@@ -52,6 +61,7 @@ class OrderService:
         self.session = session
         self.order_repository = OrderRepository(session)
         self.company_repository = CompanyRepository(session)
+        self.company_review_repository = CompanyReviewRepository(session)
         self.company_order_settings_repository = CompanyOrderSettingsRepository(session)
         self.customer_address_repository = CustomerAddressRepository(session)
         self.delivery_fee_calculator = DeliveryFeeCalculator()
@@ -244,6 +254,7 @@ class OrderService:
         self._ensure_customer(current_user)
         orders, total = await self.order_repository.list_by_customer(current_user.id, limit=limit, offset=offset)
         self._attach_customer_delivery_codes(orders)
+        await self._attach_order_review_flags(orders)
         return orders, total
 
     async def list_company_orders(self, current_user: User, *, limit: int = 50, offset: int = 0) -> tuple[list[Order], int]:
@@ -274,6 +285,16 @@ class OrderService:
         if order.status == OrderStatus.REJECTED.value:
             return await self._get_visible_order(order.id, current_user)
 
+        if order.status in TERMINAL_ORDER_STATUSES:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedido já está em status final.")
+
+        if order.status != OrderStatus.OPEN.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pedido já foi aceito. Use a opção de cancelar.",
+            )
+
+        refund_result = None
         if order.payment_method == PaymentMethod.PIX_ONLINE.value:
             from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
 
@@ -288,10 +309,81 @@ class OrderService:
                 )
             setattr(order, "refund_result", refund_result)
 
-        return await self._change_company_order_status(order_id, OrderStatus.REJECTED.value, current_user)
+        rejected_order = await self._change_company_order_status(order_id, OrderStatus.REJECTED.value, current_user)
+        self._attach_company_close_message(rejected_order, action="recusado", refund_result=refund_result)
+        return rejected_order
 
     async def cancel_order_by_company(self, order_id: int, current_user: User) -> Order:
-        return await self._change_company_order_status(order_id, OrderStatus.CANCELED.value, current_user, company_cancel=True)
+        self._ensure_company(current_user)
+        order = await self._get_order_or_404(order_id)
+        company = await self.company_repository.get_by_owner_user_id(current_user.id)
+
+        if company is None or order.company_id != company.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido não encontrado.")
+
+        if order.status == OrderStatus.CANCELED.value:
+            return await self._get_visible_order(order.id, current_user)
+
+        if order.status in {OrderStatus.DELIVERED.value, OrderStatus.PICKED_UP.value, OrderStatus.REJECTED.value}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedido já está em status final.")
+
+        if order.status in {OrderStatus.OPEN.value, OrderStatus.PENDING_PAYMENT.value}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pedido ainda não foi aceito. Use a opção de recusar.",
+            )
+
+        if order.status not in CANCELABLE_BY_COMPANY_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Pedido não pode ser cancelado no status atual: {order.status}.",
+            )
+
+        refund_result = None
+        if order.payment_method == PaymentMethod.PIX_ONLINE.value:
+            from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
+
+            try:
+                refund_result = await MercadoPagoPixPaymentService(self.session).handle_order_cancelled_by_company(order)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Pedido pago online, mas houve problema ao processar o reembolso. Tente novamente.",
+                )
+            setattr(order, "refund_result", refund_result)
+
+        await self._apply_order_status(order, OrderStatus.CANCELED.value, current_user.id)
+        cancelled_delivery = await self._cancel_delivery_if_exists(order, current_user.id)
+        await self.session.commit()
+
+        await publish_company_order_event(
+            order.company_id,
+            {
+                "type": RealtimeEventType.ORDER_CANCELLED,
+                "order_id": order.id,
+                "company_id": order.company_id,
+                "status": OrderStatus.CANCELED.value,
+                "message": f"Pedido #{order.id} cancelado pela empresa.",
+            },
+        )
+
+        if cancelled_delivery is not None:
+            await publish_courier_delivery_event(
+                {
+                    "type": RealtimeEventType.DELIVERY_CANCELLED,
+                    "delivery_id": cancelled_delivery.id,
+                    "order_id": order.id,
+                    "status": DeliveryStatus.CANCELED.value,
+                    "message": f"Entrega #{cancelled_delivery.id} cancelada.",
+                }
+            )
+
+        await self._broadcast_tracking_snapshot(order.id, "ORDER_STATUS_UPDATED")
+        cancelled_order = await self._get_visible_order(order.id, current_user)
+        self._attach_company_close_message(cancelled_order, action="cancelado", refund_result=refund_result)
+        return cancelled_order
 
     async def cancel_order_by_customer(self, order_id: int, current_user: User) -> Order:
         self._ensure_customer(current_user)
@@ -356,10 +448,10 @@ class OrderService:
         current_user: User,
         confirmation_code: str | None = None,
     ) -> Order:
-        if new_status in {OrderStatus.ACCEPTED, OrderStatus.REJECTED}:
+        if new_status in {OrderStatus.ACCEPTED, OrderStatus.REJECTED, OrderStatus.CANCELED}:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Use as rotas específicas de aceitar ou recusar para esta transição.",
+                detail="Use as rotas específicas de aceitar, recusar ou cancelar para esta transição.",
             )
         return await self._change_company_order_status(
             order_id,
@@ -581,6 +673,7 @@ class OrderService:
 
         if role_id == RoleId.CUSTOMER and order.customer_user_id == current_user.id:
             self._attach_customer_delivery_code(order)
+            await self._attach_order_review_flag(order)
             return order
 
         if role_id == RoleId.COMPANY:
@@ -608,6 +701,34 @@ class OrderService:
 
         setattr(order, "delivery_confirmation_code", delivery_code)
         setattr(order, "pickup_confirmation_code", pickup_code)
+
+    @staticmethod
+    def _attach_company_close_message(order: Order, *, action: str, refund_result: str | None) -> None:
+        message = f"Pedido {action}."
+        if refund_result in {"refunded", "already_refunded"}:
+            message = f"Pedido {action} e reembolso solicitado/realizado."
+        elif refund_result == "cancelled_pending":
+            message = f"Pedido {action} e cobrança Pix pendente cancelada."
+
+        setattr(order, "refund_result", refund_result)
+        setattr(order, "operation_message", message)
+
+    async def _attach_order_review_flags(self, orders: list[Order]) -> None:
+        reviews_by_order_id = await self.company_review_repository.list_by_order_ids([order.id for order in orders])
+        for order in orders:
+            self._set_order_review_flags(order, reviews_by_order_id.get(order.id))
+
+    async def _attach_order_review_flag(self, order: Order) -> None:
+        review = await self.company_review_repository.get_by_order_id(order.id)
+        self._set_order_review_flags(order, review)
+
+    @staticmethod
+    def _set_order_review_flags(order: Order, review) -> None:
+        has_review = review is not None
+        can_review = order.status in {OrderStatus.DELIVERED.value, OrderStatus.PICKED_UP.value} and not has_review
+        setattr(order, "has_review", has_review)
+        setattr(order, "can_review", can_review)
+        setattr(order, "review", review)
 
     async def _get_order_or_404(self, order_id: int) -> Order:
         order = await self.order_repository.get_by_id(order_id)

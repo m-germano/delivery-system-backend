@@ -155,7 +155,15 @@ class MercadoPagoPixPaymentService:
         return order
 
     async def handle_order_rejected_by_company(self, order: Order) -> str:
-        """Cancela/reembolsa pagamento online quando a loja recusa o pedido.
+        """Cancela/reembolsa pagamento online quando a loja recusa o pedido."""
+        return await self.handle_order_closed_by_company(order, action_label="recusar")
+
+    async def handle_order_cancelled_by_company(self, order: Order) -> str:
+        """Cancela/reembolsa pagamento online quando a loja cancela pedido aceito."""
+        return await self.handle_order_closed_by_company(order, action_label="cancelar")
+
+    async def handle_order_closed_by_company(self, order: Order, *, action_label: str) -> str:
+        """Cancela/reembolsa pagamento online quando a loja encerra um pedido.
 
         Retorna um marcador simples para a camada de pedidos ajustar mensagens.
         """
@@ -168,8 +176,10 @@ class MercadoPagoPixPaymentService:
 
         if payment.status == PaymentStatus.REFUNDED.value:
             logger.info(
-                "Pagamento já reembolsado ao recusar pedido. order_id=%s provider_payment_id=%s status=%s",
+                "Pagamento já reembolsado ao %s pedido. order_id=%s payment_id=%s provider_payment_id=%s status=%s",
+                action_label,
                 order.id,
+                payment.id,
                 payment.provider_payment_id,
                 payment.status,
             )
@@ -190,12 +200,21 @@ class MercadoPagoPixPaymentService:
             )
 
         account = await self._get_active_account_or_409(payment.company_id)
+        logger.info(
+            "Preparando reembolso Mercado Pago ao %s pedido. order_id=%s payment_id=%s provider_payment_id=%s",
+            action_label,
+            order.id,
+            payment.id,
+            payment.provider_payment_id,
+        )
         refund_data = await self._refund_mercado_pago_payment(account, payment.provider_payment_id)
         self._apply_refund_payload(payment, refund_data)
         await self.session.flush()
         logger.info(
-            "Pagamento reembolsado ao recusar pedido. order_id=%s provider_payment_id=%s refund_status=%s",
+            "Pagamento reembolsado ao %s pedido. order_id=%s payment_id=%s provider_payment_id=%s refund_status=%s",
+            action_label,
             order.id,
+            payment.id,
             payment.provider_payment_id,
             payment.provider_status,
         )
@@ -403,7 +422,7 @@ class MercadoPagoPixPaymentService:
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Não foi possível processar o reembolso no Mercado Pago. Tente novamente antes de recusar o pedido.",
+                detail="Não foi possível processar o reembolso no Mercado Pago. Tente novamente antes de alterar o pedido.",
             )
         return response.json()
 

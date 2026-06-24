@@ -63,3 +63,4 @@ class Order(TimestampMixin, Base):
     items: Mapped[list["OrderItem"]] = relationship(back_populates="order", cascade="all, delete-orphan")
     status_history: Mapped[list["OrderStatusHistory"]] = relationship(back_populates="order", cascade="all, delete-orphan")
     delivery: Mapped["Delivery | None"] = relationship(back_populates="order", uselist=False, cascade="all, delete-orphan")
+    review: Mapped["CompanyReview | None"] = relationship(back_populates="order", uselist=False, cascade="all, delete-orphan")

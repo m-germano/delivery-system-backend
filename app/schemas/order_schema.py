@@ -85,6 +85,15 @@ class OrderStatusHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class OrderReviewSummaryResponse(BaseModel):
+    id: int
+    rating: int
+    comment: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class OrderResponse(BaseModel):
     id: int
     customer_user_id: int
@@ -108,6 +117,11 @@ class OrderResponse(BaseModel):
     customer_address: CustomerAddressResponse | None = None
     delivery_confirmation_code: str | None = None
     pickup_confirmation_code: str | None = None
+    can_review: bool = False
+    has_review: bool = False
+    review: OrderReviewSummaryResponse | None = None
+    refund_result: str | None = None
+    operation_message: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
