@@ -47,6 +47,19 @@ services:
       AUTO_CREATE_TABLES: "true"
       VERIFY_TABLES_ON_STARTUP: "true"
       SECRET_KEY: local-development-secret-key
+      TOKEN_ENCRYPTION_KEY: 2lAxBLMcj1N8CP9M2R6ewh_Qwylc8be4qqlfIbTC_Eo=
+      MERCADO_PAGO_CLIENT_ID: ${MERCADO_PAGO_CLIENT_ID:-}
+      MERCADO_PAGO_CLIENT_SECRET: ${MERCADO_PAGO_CLIENT_SECRET:-}
+      MERCADO_PAGO_USE_PKCE: ${MERCADO_PAGO_USE_PKCE:-true}
+      MERCADO_PAGO_REDIRECT_URI: ${MERCADO_PAGO_REDIRECT_URI:-http://localhost:8000/api/payment-accounts/mercado-pago/callback}
+      MERCADO_PAGO_OAUTH_AUTHORIZE_URL: ${MERCADO_PAGO_OAUTH_AUTHORIZE_URL:-https://auth.mercadopago.com.br/authorization}
+      MERCADO_PAGO_OAUTH_TOKEN_URL: ${MERCADO_PAGO_OAUTH_TOKEN_URL:-https://api.mercadopago.com/oauth/token}
+      MERCADO_PAGO_PAYMENTS_URL: ${MERCADO_PAGO_PAYMENTS_URL:-https://api.mercadopago.com/v1/payments}
+      MERCADO_PAGO_WEBHOOK_URL: ${MERCADO_PAGO_WEBHOOK_URL:-}
+      MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
+      MERCADO_PAGO_PIX_EXPIRATION_MINUTES: ${MERCADO_PAGO_PIX_EXPIRATION_MINUTES:-30}
+      FRONTEND_MERCADO_PAGO_SUCCESS_URL: ${FRONTEND_MERCADO_PAGO_SUCCESS_URL:-http://localhost:5173/company/mercado-pago?connected=true}
+      FRONTEND_MERCADO_PAGO_ERROR_URL: ${FRONTEND_MERCADO_PAGO_ERROR_URL:-http://localhost:5173/company/mercado-pago?connected=false}
     ports:
       - "8000:8000"
     volumes:

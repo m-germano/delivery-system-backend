@@ -12,9 +12,12 @@ from app.models import (  # noqa: F401 - garante registro dos models no metadata
     Delivery,
     DeliveryFeeRule,
     DeliveryStatusHistory,
+    CompanyPaymentAccount,
     Order,
     OrderItem,
     OrderStatusHistory,
+    Payment,
+    PaymentOAuthState,
     Product,
     ProductCategory,
     Role,
@@ -36,6 +39,9 @@ REQUIRED_TABLES = {
     "couriers",
     "deliveries",
     "delivery_status_history",
+    "company_payment_accounts",
+    "payments",
+    "payment_oauth_states",
 }
 
 INITIAL_ROLES = [
@@ -110,7 +116,7 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
                 """
                 ALTER TABLE orders
                 ADD CONSTRAINT ck_orders_status
-                CHECK (status IN ('ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO'))
+                CHECK (status IN ('AGUARDANDO_PAGAMENTO','ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO'))
                 """
             )
         )
@@ -119,10 +125,30 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
                 """
                 ALTER TABLE orders
                 ADD CONSTRAINT ck_orders_payment_method
-                CHECK (payment_method IN ('CREDITO','DEBITO','PIX','DINHEIRO'))
+                CHECK (payment_method IN ('CREDITO','DEBITO','PIX','PIX_ONLINE','DINHEIRO'))
                 """
             )
         )
+
+    if "payments" in existing_tables:
+        async with db_engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(160)"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS qr_code TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS qr_code_base64 TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_status VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_status_detail TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS raw_response JSON"))
+            await conn.execute(text("ALTER TABLE payments DROP CONSTRAINT IF EXISTS ck_payments_status"))
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE payments
+                    ADD CONSTRAINT ck_payments_status
+                    CHECK (status IN ('pending','in_process','approved','rejected','cancelled','refunded','failed','expired'))
+                    """
+                )
+            )
 
 
 async def verify_required_tables(db_engine: AsyncEngine = engine) -> None:

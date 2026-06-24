@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import DeliveryStatus, OrderStatus, RoleId
+from app.core.enums import DeliveryStatus, OrderStatus, PaymentMethod, RoleId
 from app.models import Delivery, DeliveryStatusHistory, Order, OrderItem, OrderStatusHistory, User
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.customer_address_repository import CustomerAddressRepository
@@ -13,6 +13,7 @@ from app.schemas.order_schema import (
     OrderCalculationResponse,
     OrderCreateRequest,
 )
+from app.schemas.payment_schema import PixOrderCreateResponse
 from app.services.delivery_code_service import DeliveryCodeService
 from app.services.delivery_fee_service import DeliveryFeeCalculator
 from app.services.route_service import RouteDistanceService
@@ -97,6 +98,50 @@ class OrderService:
         )
 
     async def create_order(self, data: OrderCreateRequest, current_user: User) -> Order:
+        if data.payment_method == PaymentMethod.PIX_ONLINE:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Use a rota /orders/pix para criar pedidos com Pix online.",
+            )
+
+        order = await self._create_order_with_status(data, current_user, OrderStatus.OPEN.value)
+        await self.session.commit()
+
+        await publish_company_order_event(
+            order.company_id,
+            {
+                "type": RealtimeEventType.ORDER_CREATED,
+                "order_id": order.id,
+                "company_id": order.company_id,
+                "status": OrderStatus.OPEN.value,
+                "message": f"Novo pedido #{order.id} recebido.",
+            },
+        )
+
+        return await self._get_visible_order(order.id, current_user)
+
+    async def create_pix_online_order(self, data: OrderCreateRequest, current_user: User) -> PixOrderCreateResponse:
+        from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
+
+        data.payment_method = PaymentMethod.PIX_ONLINE
+        order = await self._create_order_with_status(data, current_user, OrderStatus.PENDING_PAYMENT.value)
+        await self.session.commit()
+        await self.session.refresh(order)
+
+        payment = await MercadoPagoPixPaymentService(self.session).create_pix_payment_for_order(order, current_user)
+
+        return PixOrderCreateResponse(
+            order_id=order.id,
+            payment_id=payment.id,
+            provider_payment_id=payment.provider_payment_id,
+            payment_status=payment.status,
+            qr_code=payment.qr_code,
+            qr_code_base64=payment.qr_code_base64,
+            expires_at=payment.expires_at,
+            amount=payment.amount,
+        )
+
+    async def _create_order_with_status(self, data: OrderCreateRequest, current_user: User, initial_status: str) -> Order:
         calculation = await self.calculate_order(data, current_user)
         product_map = await self._get_products_for_order(data)
 
@@ -104,7 +149,7 @@ class OrderService:
             customer_user_id=current_user.id,
             company_id=calculation.company_id,
             customer_address_id=calculation.customer_address_id,
-            status=OrderStatus.OPEN.value,
+            status=initial_status,
             subtotal=calculation.subtotal,
             delivery_fee=calculation.delivery_fee,
             total=calculation.total,
@@ -134,25 +179,13 @@ class OrderService:
             OrderStatusHistory(
                 order_id=order.id,
                 old_status=None,
-                new_status=OrderStatus.OPEN.value,
+                new_status=initial_status,
                 changed_by_user_id=current_user.id,
             )
         )
 
-        await self.session.commit()
-
-        await publish_company_order_event(
-            order.company_id,
-            {
-                "type": RealtimeEventType.ORDER_CREATED,
-                "order_id": order.id,
-                "company_id": order.company_id,
-                "status": OrderStatus.OPEN.value,
-                "message": f"Novo pedido #{order.id} recebido.",
-            },
-        )
-
-        return await self._get_visible_order(order.id, current_user)
+        await self.session.flush()
+        return order
 
     async def list_my_orders(self, current_user: User, *, limit: int = 50, offset: int = 0) -> tuple[list[Order], int]:
         self._ensure_customer(current_user)
@@ -190,7 +223,7 @@ class OrderService:
         if order.customer_user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido não encontrado.")
 
-        if order.status != OrderStatus.OPEN.value:
+        if order.status not in {OrderStatus.OPEN.value, OrderStatus.PENDING_PAYMENT.value}:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="O cliente só pode cancelar o pedido antes da confirmação pelo estabelecimento.",
@@ -524,4 +557,3 @@ class OrderService:
     def _ensure_admin(current_user: User) -> None:
         if current_user.role_id != RoleId.ADMIN:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Apenas administradores podem executar esta operação.")
-

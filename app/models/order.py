@@ -15,11 +15,11 @@ class Order(TimestampMixin, Base):
         CheckConstraint("total >= 0", name="ck_orders_total_non_negative"),
         CheckConstraint("distance_km >= 0", name="ck_orders_distance_non_negative"),
         CheckConstraint(
-            "status IN ('ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO')",
+            "status IN ('AGUARDANDO_PAGAMENTO','ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO')",
             name="ck_orders_status",
         ),
         CheckConstraint(
-            "payment_method IS NULL OR payment_method IN ('CREDITO','DEBITO','PIX','DINHEIRO')",
+            "payment_method IS NULL OR payment_method IN ('CREDITO','DEBITO','PIX','PIX_ONLINE','DINHEIRO')",
             name="ck_orders_payment_method",
         ),
     )
