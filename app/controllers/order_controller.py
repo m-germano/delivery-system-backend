@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import RoleId
+from app.core.enums import PaymentStatus, RoleId
 from app.core.security import get_current_user, require_roles
 from app.db.session import get_db
 from app.schemas.order_schema import (
@@ -11,7 +11,9 @@ from app.schemas.order_schema import (
     OrderResponse,
     OrderStatusUpdateRequest,
 )
+from app.schemas.payment_schema import OrderPaymentStatusResponse, PaymentResponse, PixOrderCreateResponse
 from app.services.order_service import OrderService
+from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
 
 router = APIRouter(tags=["Orders"])
 
@@ -32,6 +34,15 @@ async def create_order(
     current_user=Depends(require_roles(RoleId.CUSTOMER)),
 ):
     return await OrderService(db).create_order(data, current_user)
+
+
+@router.post("/orders/pix", response_model=PixOrderCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_pix_order(
+    data: OrderCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    return await OrderService(db).create_pix_online_order(data, current_user)
 
 
 @router.get("/orders/my", response_model=OrderListResponse)
@@ -74,6 +85,60 @@ async def get_order(
     current_user=Depends(get_current_user),
 ):
     return await OrderService(db).get_order(order_id, current_user)
+
+
+@router.get("/orders/{order_id}/payment-status", response_model=OrderPaymentStatusResponse)
+async def get_order_payment_status(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    order = await OrderService(db).get_order(order_id, current_user)
+    payment_service = MercadoPagoPixPaymentService(db)
+    payment = await payment_service.payment_repository.get_latest_by_order(order.id)
+    if payment and payment.provider_payment_id and payment.status in {PaymentStatus.PENDING.value, PaymentStatus.IN_PROCESS.value}:
+        payment = await payment_service.refresh_payment_from_provider(payment)
+    action_flags = payment_service.get_payment_action_flags(order, payment)
+    return OrderPaymentStatusResponse(
+        order_id=order.id,
+        order_status=order.status,
+        payment_status=payment.status if payment else None,
+        payment=PaymentResponse.model_validate(payment) if payment else None,
+        **action_flags,
+    )
+
+
+@router.post("/orders/{order_id}/payments/pix/cancel", response_model=PaymentResponse)
+async def cancel_pix_payment(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    order = await OrderService(db).get_order(order_id, current_user)
+    payment = await MercadoPagoPixPaymentService(db).cancel_pending_pix_payment(order, current_user)
+    return payment
+
+
+@router.post("/orders/{order_id}/payments/pix/regenerate", response_model=PaymentResponse)
+async def regenerate_pix_payment(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    order = await OrderService(db).get_order(order_id, current_user)
+    payment = await MercadoPagoPixPaymentService(db).regenerate_pix_payment_for_order(order, current_user)
+    return payment
+
+
+@router.patch("/orders/{order_id}/payments/switch-to-delivery", response_model=OrderResponse)
+async def switch_to_pay_on_delivery(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    order = await OrderService(db).get_order(order_id, current_user)
+    updated_order = await MercadoPagoPixPaymentService(db).switch_pending_order_to_pay_on_delivery(order, current_user)
+    return await OrderService(db).get_order(updated_order.id, current_user)
 
 
 @router.patch("/orders/{order_id}/accept", response_model=OrderResponse)
@@ -128,4 +193,9 @@ async def update_order_status(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles(RoleId.COMPANY)),
 ):
-    return await OrderService(db).update_company_status(order_id, data.status, current_user)
+    return await OrderService(db).update_company_status(
+        order_id,
+        data.status,
+        current_user,
+        confirmation_code=data.confirmation_code,
+    )

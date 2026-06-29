@@ -1,0 +1,75 @@
+# Stack local apenas do backend.
+# O frontend React/Vite continua rodando no host com npm run dev.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: delivery_postgres
+    environment:
+      POSTGRES_DB: delivery_db
+      POSTGRES_USER: delivery_user
+      POSTGRES_PASSWORD: delivery_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - delivery_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery_user -d delivery_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: delivery_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - delivery_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: delivery_backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://delivery_user:delivery_pass@postgres:5432/delivery_db
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
+      AUTO_CREATE_TABLES: "true"
+      VERIFY_TABLES_ON_STARTUP: "true"
+      SECRET_KEY: local-development-secret-key
+      TOKEN_ENCRYPTION_KEY: 2lAxBLMcj1N8CP9M2R6ewh_Qwylc8be4qqlfIbTC_Eo=
+      MERCADO_PAGO_CLIENT_ID: ${MERCADO_PAGO_CLIENT_ID:-}
+      MERCADO_PAGO_CLIENT_SECRET: ${MERCADO_PAGO_CLIENT_SECRET:-}
+      MERCADO_PAGO_USE_PKCE: ${MERCADO_PAGO_USE_PKCE:-true}
+      MERCADO_PAGO_REDIRECT_URI: ${MERCADO_PAGO_REDIRECT_URI:-http://localhost:8000/api/payment-accounts/mercado-pago/callback}
+      MERCADO_PAGO_OAUTH_AUTHORIZE_URL: ${MERCADO_PAGO_OAUTH_AUTHORIZE_URL:-https://auth.mercadopago.com.br/authorization}
+      MERCADO_PAGO_OAUTH_TOKEN_URL: ${MERCADO_PAGO_OAUTH_TOKEN_URL:-https://api.mercadopago.com/oauth/token}
+      MERCADO_PAGO_PAYMENTS_URL: ${MERCADO_PAGO_PAYMENTS_URL:-https://api.mercadopago.com/v1/payments}
+      MERCADO_PAGO_WEBHOOK_URL: ${MERCADO_PAGO_WEBHOOK_URL:-}
+      MERCADO_PAGO_WEBHOOK_SECRET: ${MERCADO_PAGO_WEBHOOK_SECRET:-}
+      MERCADO_PAGO_PIX_EXPIRATION_MINUTES: ${MERCADO_PAGO_PIX_EXPIRATION_MINUTES:-30}
+      FRONTEND_MERCADO_PAGO_SUCCESS_URL: ${FRONTEND_MERCADO_PAGO_SUCCESS_URL:-http://localhost:5173/company/mercado-pago?connected=true}
+      FRONTEND_MERCADO_PAGO_ERROR_URL: ${FRONTEND_MERCADO_PAGO_ERROR_URL:-http://localhost:5173/company/mercado-pago?connected=false}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  delivery_pgdata:
+  delivery_redis_data:

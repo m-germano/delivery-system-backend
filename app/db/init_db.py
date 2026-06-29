@@ -7,14 +7,19 @@ from app.db.session import AsyncSessionLocal, engine
 from app.models import (  # noqa: F401 - garante registro dos models no metadata
     Company,
     CompanyAddress,
+    CompanyOrderSettings,
     Courier,
     CustomerAddress,
     Delivery,
     DeliveryFeeRule,
     DeliveryStatusHistory,
+    CompanyPaymentAccount,
+    CompanyReview,
     Order,
     OrderItem,
     OrderStatusHistory,
+    Payment,
+    PaymentOAuthState,
     Product,
     ProductCategory,
     Role,
@@ -26,6 +31,7 @@ REQUIRED_TABLES = {
     "users",
     "companies",
     "company_addresses",
+    "company_order_settings",
     "product_categories",
     "products",
     "customer_addresses",
@@ -36,6 +42,10 @@ REQUIRED_TABLES = {
     "couriers",
     "deliveries",
     "delivery_status_history",
+    "company_payment_accounts",
+    "company_reviews",
+    "payments",
+    "payment_oauth_states",
 }
 
 INITIAL_ROLES = [
@@ -110,7 +120,7 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
                 """
                 ALTER TABLE orders
                 ADD CONSTRAINT ck_orders_status
-                CHECK (status IN ('ABERTO','ACEITO','EM_PREPARO','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','CANCELADO','RECUSADO'))
+                CHECK (status IN ('AGUARDANDO_PAGAMENTO','ABERTO','ACEITO','EM_PREPARO','PRONTO_PARA_RETIRADA','AGUARDANDO_ENTREGADOR','EM_ENTREGA','ENTREGUE','RETIRADO','CANCELADO','RECUSADO'))
                 """
             )
         )
@@ -119,10 +129,125 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
                 """
                 ALTER TABLE orders
                 ADD CONSTRAINT ck_orders_payment_method
-                CHECK (payment_method IN ('CREDITO','DEBITO','PIX','DINHEIRO'))
+                CHECK (payment_method IN ('CREDITO','DEBITO','PIX','PIX_ONLINE','DINHEIRO'))
                 """
             )
         )
+        await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type VARCHAR(20) DEFAULT 'DELIVERY'"))
+        await conn.execute(text("UPDATE orders SET fulfillment_type = 'DELIVERY' WHERE fulfillment_type IS NULL"))
+        await conn.execute(text("ALTER TABLE orders ALTER COLUMN fulfillment_type SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(10, 2) DEFAULT 0"))
+        await conn.execute(text("UPDATE orders SET discount_amount = 0 WHERE discount_amount IS NULL"))
+        await conn.execute(text("ALTER TABLE orders ALTER COLUMN discount_amount SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_discount_percent NUMERIC(5, 2) DEFAULT 0"))
+        await conn.execute(text("UPDATE orders SET pickup_discount_percent = 0 WHERE pickup_discount_percent IS NULL"))
+        await conn.execute(text("ALTER TABLE orders ALTER COLUMN pickup_discount_percent SET NOT NULL"))
+        await conn.execute(text("ALTER TABLE orders ALTER COLUMN customer_address_id DROP NOT NULL"))
+        await conn.execute(text("ALTER TABLE orders DROP CONSTRAINT IF EXISTS ck_orders_fulfillment_type"))
+        await conn.execute(text("ALTER TABLE orders DROP CONSTRAINT IF EXISTS ck_orders_discount_non_negative"))
+        await conn.execute(text("ALTER TABLE orders DROP CONSTRAINT IF EXISTS ck_orders_pickup_discount_range"))
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE orders
+                ADD CONSTRAINT ck_orders_fulfillment_type
+                CHECK (fulfillment_type IN ('DELIVERY','PICKUP'))
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE orders
+                ADD CONSTRAINT ck_orders_discount_non_negative
+                CHECK (discount_amount >= 0)
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE orders
+                ADD CONSTRAINT ck_orders_pickup_discount_range
+                CHECK (pickup_discount_percent >= 0 AND pickup_discount_percent <= 100)
+                """
+            )
+        )
+
+    if "companies" in existing_tables:
+        async with db_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS company_order_settings (
+                        id BIGSERIAL PRIMARY KEY,
+                        company_id BIGINT NOT NULL UNIQUE REFERENCES companies(id) ON DELETE CASCADE,
+                        accepts_delivery BOOLEAN NOT NULL DEFAULT true,
+                        accepts_pickup BOOLEAN NOT NULL DEFAULT false,
+                        pickup_discount_percent NUMERIC(5, 2) NOT NULL DEFAULT 0,
+                        minimum_order_value NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        CONSTRAINT ck_company_order_settings_at_least_one_mode CHECK (accepts_delivery OR accepts_pickup),
+                        CONSTRAINT ck_company_order_settings_pickup_discount_range CHECK (pickup_discount_percent >= 0 AND pickup_discount_percent <= 100),
+                        CONSTRAINT ck_company_order_settings_minimum_order_non_negative CHECK (minimum_order_value >= 0)
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO company_order_settings (company_id)
+                    SELECT id FROM companies
+                    ON CONFLICT (company_id) DO NOTHING
+                    """
+                )
+            )
+
+    if {"companies", "users", "orders"}.issubset(existing_tables):
+        async with db_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS company_reviews (
+                        id BIGSERIAL PRIMARY KEY,
+                        company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                        customer_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        order_id BIGINT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+                        rating INTEGER NOT NULL,
+                        comment TEXT,
+                        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+                        CONSTRAINT ck_company_reviews_rating_range CHECK (rating >= 1 AND rating <= 5)
+                    )
+                    """
+                )
+            )
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_company_id ON company_reviews(company_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_customer_user_id ON company_reviews(customer_user_id)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_company_reviews_order_id ON company_reviews(order_id)"))
+
+    if "payments" in existing_tables:
+        async with db_engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(160)"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS qr_code TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS qr_code_base64 TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_status VARCHAR(80)"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_status_detail TEXT"))
+            await conn.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS raw_response JSON"))
+            await conn.execute(text("ALTER TABLE payments DROP CONSTRAINT IF EXISTS ck_payments_status"))
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE payments
+                    ADD CONSTRAINT ck_payments_status
+                    CHECK (status IN ('pending','in_process','approved','rejected','cancelled','refunded','failed','expired'))
+                    """
+                )
+            )
 
 
 async def verify_required_tables(db_engine: AsyncEngine = engine) -> None:

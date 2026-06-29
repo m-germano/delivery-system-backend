@@ -24,6 +24,20 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-development"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
     JWT_ALGORITHM: str = "HS256"
+    TOKEN_ENCRYPTION_KEY: str | None = None
+
+    MERCADO_PAGO_CLIENT_ID: str | None = None
+    MERCADO_PAGO_CLIENT_SECRET: str | None = None
+    MERCADO_PAGO_USE_PKCE: bool = True
+    MERCADO_PAGO_REDIRECT_URI: str | None = None
+    MERCADO_PAGO_OAUTH_AUTHORIZE_URL: str = "https://auth.mercadopago.com.br/authorization"
+    MERCADO_PAGO_OAUTH_TOKEN_URL: str = "https://api.mercadopago.com/oauth/token"
+    MERCADO_PAGO_PAYMENTS_URL: str = "https://api.mercadopago.com/v1/payments"
+    MERCADO_PAGO_WEBHOOK_URL: str | None = None
+    MERCADO_PAGO_WEBHOOK_SECRET: str | None = None
+    MERCADO_PAGO_PIX_EXPIRATION_MINUTES: int = 30
+    FRONTEND_MERCADO_PAGO_SUCCESS_URL: str = "http://localhost:5173/company/mercado-pago?connected=true"
+    FRONTEND_MERCADO_PAGO_ERROR_URL: str = "http://localhost:5173/company/mercado-pago?connected=false"
 
     VIACEP_BASE_URL: str = "https://viacep.com.br/ws"
     NOMINATIM_BASE_URL: str = "https://nominatim.openstreetmap.org"

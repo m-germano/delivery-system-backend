@@ -173,4 +173,9 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+# Ngrok
+ngrok.yml
+.ngrok2/
+ngrok-v3-stable-linux-amd64.tgz
+
 # End of https://www.toptal.com/developers/gitignore/api/python

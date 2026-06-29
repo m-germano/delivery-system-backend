@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import DeliveryStatus, OrderStatus, RoleId
+from app.core.enums import DeliveryStatus, FulfillmentType, OrderStatus, RoleId
 from app.models import Delivery, DeliveryStatusHistory, Order, OrderStatusHistory, User
 from app.repositories.courier_repository import CourierRepository
 from app.repositories.delivery_repository import DeliveryRepository
@@ -84,6 +84,9 @@ class DeliveryService:
 
         if delivery.order.status != OrderStatus.WAITING_COURIER.value:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="O pedido não está aguardando entregador.")
+
+        if delivery.order.fulfillment_type != FulfillmentType.DELIVERY.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pedidos de retirada não podem ser aceitos por entregador.")
 
         now = datetime.utcnow()
         delivery.courier_user_id = current_user.id

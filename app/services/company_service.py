@@ -1,8 +1,9 @@
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Company, CompanyAddress, User
+from app.models import Company, CompanyAddress, CompanyOrderSettings, User
 from app.repositories.company_repository import CompanyRepository
+from app.repositories.company_review_repository import CompanyReviewRepository
 from app.repositories.customer_address_repository import CustomerAddressRepository
 from app.schemas.company_schema import (
     CompanyCreateRequest,
@@ -18,6 +19,7 @@ class CompanyService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.company_repository = CompanyRepository(session)
+        self.company_review_repository = CompanyReviewRepository(session)
         self.customer_address_repository = CustomerAddressRepository(session)
         self.address_service = AddressService()
         self.delivery_fee_calculator = DeliveryFeeCalculator()
@@ -25,7 +27,9 @@ class CompanyService:
     async def list_active_companies(self, *, limit: int = 50, offset: int = 0) -> list[Company]:
         safe_limit = max(1, min(limit, 100))
         safe_offset = max(0, offset)
-        return await self.company_repository.list_active(limit=safe_limit, offset=safe_offset)
+        companies = await self.company_repository.list_active(limit=safe_limit, offset=safe_offset)
+        await self._attach_review_summaries(companies)
+        return companies
 
     async def list_nearby_companies_for_customer(
         self,
@@ -46,6 +50,7 @@ class CompanyService:
             )
 
         companies = await self.company_repository.list_active(limit=safe_limit, offset=safe_offset)
+        await self._attach_review_summaries(companies)
         nearby_companies: list[CompanyNearbyResponse] = []
 
         for company in companies:
@@ -87,6 +92,7 @@ class CompanyService:
                 detail="Empresa não encontrada.",
             )
 
+        await self._attach_review_summary(company)
         return company
 
     async def get_my_company(self, current_user: User) -> Company:
@@ -98,6 +104,7 @@ class CompanyService:
                 detail="Empresa ainda não configurada para este usuário.",
             )
 
+        await self._attach_review_summary(company)
         return company
 
     async def create_company(self, data: CompanyCreateRequest, current_user: User) -> Company:
@@ -142,10 +149,23 @@ class CompanyService:
                 longitude=completed_address.longitude,
             )
         )
+        self.session.add(CompanyOrderSettings(company_id=company.id))
 
         await self.session.commit()
 
         return await self.get_my_company(current_user)
+
+    async def _attach_review_summaries(self, companies: list[Company]) -> None:
+        summaries = await self.company_review_repository.get_summaries_by_company_ids([company.id for company in companies])
+        for company in companies:
+            average_rating, reviews_count = summaries.get(company.id, (None, 0))
+            setattr(company, "average_rating", average_rating)
+            setattr(company, "reviews_count", reviews_count)
+
+    async def _attach_review_summary(self, company: Company) -> None:
+        average_rating, reviews_count = await self.company_review_repository.get_summary_by_company(company.id)
+        setattr(company, "average_rating", average_rating)
+        setattr(company, "reviews_count", reviews_count)
 
     async def update_my_company(self, data: CompanyUpdateRequest, current_user: User) -> Company:
         company = await self.get_my_company(current_user)

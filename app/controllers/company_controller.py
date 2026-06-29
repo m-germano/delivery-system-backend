@@ -4,7 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import RoleId
 from app.core.security import require_roles
 from app.db.session import get_db
+from app.schemas.company_order_settings_schema import CompanyOrderSettingsResponse, CompanyOrderSettingsUpdateRequest
 from app.schemas.company_schema import CompanyCreateRequest, CompanyListResponse, CompanyNearbyListResponse, CompanyResponse, CompanyUpdateRequest
+from app.services.company_order_settings_service import CompanyOrderSettingsService
 from app.services.company_service import CompanyService
 
 router = APIRouter(prefix="/companies", tags=["Companies"])
@@ -59,6 +61,28 @@ async def update_my_company(
     current_user=Depends(require_roles(RoleId.COMPANY)),
 ):
     return await CompanyService(db).update_my_company(data, current_user)
+
+
+@router.get("/me/order-settings", response_model=CompanyOrderSettingsResponse)
+async def get_my_order_settings(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.COMPANY)),
+):
+    return await CompanyOrderSettingsService(db).get_my_settings(current_user)
+
+
+@router.put("/me/order-settings", response_model=CompanyOrderSettingsResponse)
+async def update_my_order_settings(
+    data: CompanyOrderSettingsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.COMPANY)),
+):
+    return await CompanyOrderSettingsService(db).update_my_settings(data, current_user)
+
+
+@router.get("/{company_id}/order-settings", response_model=CompanyOrderSettingsResponse)
+async def get_company_order_settings(company_id: int, db: AsyncSession = Depends(get_db)):
+    return await CompanyOrderSettingsService(db).get_public_settings(company_id)
 
 
 @router.get("/{company_id}", response_model=CompanyResponse)

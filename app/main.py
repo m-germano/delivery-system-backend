@@ -12,8 +12,11 @@ from app.controllers import (
     delivery_controller,
     health_controller,
     order_controller,
+    payment_account_controller,
+    payment_controller,
     product_controller,
     realtime_controller,
+    review_controller,
     tracking_controller,
 )
 from app.core.config import settings
@@ -60,6 +63,10 @@ app.include_router(customer_address_controller.router, prefix=settings.API_PREFI
 app.include_router(courier_controller.router, prefix=settings.API_PREFIX)
 app.include_router(product_controller.router, prefix=settings.API_PREFIX)
 app.include_router(order_controller.router, prefix=settings.API_PREFIX)
+app.include_router(review_controller.router, prefix=settings.API_PREFIX)
+app.include_router(payment_account_controller.router, prefix=settings.API_PREFIX)
+app.include_router(payment_account_controller.callback_router, prefix=settings.API_PREFIX)
+app.include_router(payment_controller.router, prefix=settings.API_PREFIX)
 app.include_router(delivery_controller.router, prefix=settings.API_PREFIX)
 app.include_router(tracking_controller.http_router, prefix=settings.API_PREFIX)
 app.include_router(realtime_controller.router)

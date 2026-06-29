@@ -2,6 +2,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.enums import OrderStatus
 from app.models import Company, Order, Product
 
 
@@ -18,6 +19,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .where(Order.id == order_id)
         )
@@ -34,6 +36,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .where(base_filters)
             .order_by(Order.created_at.desc(), Order.id.desc())
@@ -43,8 +46,8 @@ class OrderRepository:
         return list(orders_result.scalars().unique().all()), int(total_result.scalar_one() or 0)
 
     async def list_by_company(self, company_id: int, *, limit: int = 50, offset: int = 0) -> tuple[list[Order], int]:
-        base_filters = Order.company_id == company_id
-        total_result = await self.session.execute(select(func.count(Order.id)).where(base_filters))
+        base_filters = (Order.company_id == company_id, Order.status != OrderStatus.PENDING_PAYMENT.value)
+        total_result = await self.session.execute(select(func.count(Order.id)).where(*base_filters))
         orders_result = await self.session.execute(
             select(Order)
             .options(
@@ -53,8 +56,9 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
-            .where(base_filters)
+            .where(*base_filters)
             .order_by(Order.created_at.desc(), Order.id.desc())
             .limit(limit)
             .offset(offset)
@@ -71,6 +75,7 @@ class OrderRepository:
                 selectinload(Order.company).selectinload(Company.address),
                 selectinload(Order.customer_address),
                 selectinload(Order.delivery),
+                selectinload(Order.review),
             )
             .order_by(Order.created_at.desc(), Order.id.desc())
             .limit(limit)

@@ -2,7 +2,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.enums import DeliveryStatus, OrderStatus
+from app.core.enums import DeliveryStatus, FulfillmentType, OrderStatus
 from app.models import Company, Delivery, Order
 
 DELIVERY_LOAD_OPTIONS = (
@@ -31,6 +31,7 @@ class DeliveryRepository:
             Delivery.status == DeliveryStatus.AVAILABLE.value,
             Delivery.courier_user_id.is_(None),
             Delivery.order.has(Order.status == OrderStatus.WAITING_COURIER.value),
+            Delivery.order.has(Order.fulfillment_type == FulfillmentType.DELIVERY.value),
         )
         total_result = await self.session.execute(select(func.count(Delivery.id)).where(*filters))
         deliveries_result = await self.session.execute(

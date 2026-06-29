@@ -108,6 +108,8 @@ class CompanyResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     address: CompanyAddressResponse
+    average_rating: Decimal | None = None
+    reviews_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
