@@ -70,6 +70,7 @@ class OrderService:
     async def calculate_order(self, data: OrderCreateRequest, current_user: User) -> OrderCalculationResponse:
         self._ensure_customer(current_user)
         company = await self._get_active_company_with_location(data.company_id)
+        self._ensure_company_is_open_for_orders(company)
         order_settings = await self.company_order_settings_repository.get_or_create_default(company.id)
         product_map = await self._get_products_for_order(data)
 
@@ -765,6 +766,14 @@ class OrderService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Empresa sem latitude/longitude configurada.")
 
         return company
+
+    @staticmethod
+    def _ensure_company_is_open_for_orders(company) -> None:
+        if not getattr(company, "is_open", False):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A loja está fechada no momento.",
+            )
 
     async def _get_customer_address_for_order(self, customer_address_id: int | None, customer_user_id: int):
         if customer_address_id:

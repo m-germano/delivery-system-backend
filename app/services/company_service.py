@@ -8,6 +8,7 @@ from app.repositories.customer_address_repository import CustomerAddressReposito
 from app.schemas.company_schema import (
     CompanyCreateRequest,
     CompanyNearbyResponse,
+    CompanyOpenStatusRequest,
     CompanyResponse,
     CompanyUpdateRequest,
 )
@@ -130,6 +131,7 @@ class CompanyService:
             document=data.document,
             image_url=data.image_url,
             is_active=True,
+            is_open=False,
         )
 
         self.session.add(company)
@@ -151,6 +153,14 @@ class CompanyService:
         )
         self.session.add(CompanyOrderSettings(company_id=company.id))
 
+        await self.session.commit()
+
+        return await self.get_my_company(current_user)
+
+    async def update_my_company_open_status(self, data: CompanyOpenStatusRequest, current_user: User) -> Company:
+        company = await self.get_my_company(current_user)
+
+        company.is_open = data.is_open
         await self.session.commit()
 
         return await self.get_my_company(current_user)

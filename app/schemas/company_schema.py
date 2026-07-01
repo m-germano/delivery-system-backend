@@ -81,6 +81,10 @@ class CompanyUpdateRequest(CompanyCreateRequest):
     pass
 
 
+class CompanyOpenStatusRequest(BaseModel):
+    is_open: bool
+
+
 class CompanyAddressResponse(BaseModel):
     id: int
     street: str
@@ -105,6 +109,7 @@ class CompanyResponse(BaseModel):
     document: str | None = None
     image_url: str | None = None
     is_active: bool
+    is_open: bool = False
     created_at: datetime
     updated_at: datetime
     address: CompanyAddressResponse
