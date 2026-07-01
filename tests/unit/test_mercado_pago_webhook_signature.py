@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +9,13 @@ from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentS
 
 
 class FakeRequest:
-    def __init__(self, payload: dict, headers: dict | None = None):
+    def __init__(self, payload: dict, headers: dict | None = None, query_params: dict | None = None):
         self._payload = payload
         self.headers = headers or {}
+        self.query_params = query_params or {}
+
+    async def body(self):
+        return json.dumps(self._payload).encode("utf-8")
 
     async def json(self):
         return self._payload
@@ -31,7 +36,7 @@ async def test_webhook_without_secret_accepts_and_processes(monkeypatch):
     monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", "")
     processed = {"called": False}
 
-    async def fake_process(self, payload):
+    async def fake_process(self, payload, *, query_params=None):
         processed["called"] = True
 
     monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
@@ -52,9 +57,10 @@ async def test_webhook_with_valid_signature_accepts_and_processes(monkeypatch):
     x_request_id = "request-123"
     timestamp = "1719191332"
     monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", secret)
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_TOLERANCE_SECONDS", 0)
     processed = {"called": False}
 
-    async def fake_process(self, payload):
+    async def fake_process(self, payload, *, query_params=None):
         processed["called"] = True
 
     monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
@@ -82,9 +88,10 @@ async def test_webhook_with_valid_signature_accepts_and_processes(monkeypatch):
 @pytest.mark.asyncio
 async def test_webhook_with_invalid_signature_rejects_and_does_not_process(monkeypatch):
     monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", "webhook-secret")
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_TOLERANCE_SECONDS", 0)
     processed = {"called": False}
 
-    async def fake_process(self, payload):
+    async def fake_process(self, payload, *, query_params=None):
         processed["called"] = True
 
     monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
@@ -103,3 +110,59 @@ async def test_webhook_with_invalid_signature_rejects_and_does_not_process(monke
 
     assert exc_info.value.status_code == 401
     assert processed["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_webhook_accepts_data_id_from_query_params(monkeypatch):
+    secret = "webhook-secret"
+    provider_payment_id = "164726173751"
+    x_request_id = "request-123"
+    timestamp = "1719191332"
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", secret)
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_TOLERANCE_SECONDS", 0)
+    processed = {"called": False}
+
+    async def fake_process(self, payload, *, query_params=None):
+        processed["called"] = True
+        assert query_params["data.id"] == provider_payment_id
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
+
+    response = await mercado_pago_webhook(
+        FakeRequest(
+            {"type": "payment"},
+            headers={
+                "x-request-id": x_request_id,
+                "x-signature": build_signature(
+                    secret=secret,
+                    provider_payment_id=provider_payment_id,
+                    x_request_id=x_request_id,
+                    timestamp=timestamp,
+                ),
+            },
+            query_params={"data.id": provider_payment_id},
+        ),
+        db=SimpleNamespace(),
+    )
+
+    assert response.received is True
+    assert processed["called"] is True
+
+
+@pytest.mark.asyncio
+async def test_webhook_ignores_oauth_application_events_even_with_secret(monkeypatch):
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", "webhook-secret")
+    processed = {"called": False}
+
+    async def fake_process(self, payload, *, query_params=None):
+        processed["called"] = True
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
+
+    response = await mercado_pago_webhook(
+        FakeRequest({"action": "application.authorized", "type": "mp-connect", "data": {"id": "app-1"}}),
+        db=SimpleNamespace(),
+    )
+
+    assert response.received is True
+    assert processed["called"] is True

@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, JSON, Numeric, String, Text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, JSON, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import PaymentProvider, PaymentStatus
@@ -24,6 +24,13 @@ class Payment(TimestampMixin, Base):
             name="ck_payments_status",
         ),
         CheckConstraint("amount >= 0", name="ck_payments_amount_non_negative"),
+        Index(
+            "uq_payments_provider_payment_id",
+            "provider",
+            "provider_payment_id",
+            unique=True,
+            postgresql_where=text("provider_payment_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -49,3 +56,35 @@ class Payment(TimestampMixin, Base):
     raw_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
     raw_status_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def checkout_preference_id(self) -> str | None:
+        preference = self._raw_preference_payload()
+        preference_id = preference.get("id") if isinstance(preference, dict) else None
+        return str(preference_id) if preference_id is not None else self.provider_order_id
+
+    @property
+    def checkout_url(self) -> str | None:
+        preference = self._raw_preference_payload()
+        if not isinstance(preference, dict):
+            return None
+        value = preference.get("init_point") or preference.get("checkout_url")
+        return str(value) if value else None
+
+    @property
+    def sandbox_checkout_url(self) -> str | None:
+        preference = self._raw_preference_payload()
+        if not isinstance(preference, dict):
+            return None
+        value = preference.get("sandbox_init_point")
+        return str(value) if value else None
+
+    def _raw_preference_payload(self) -> dict | None:
+        if not isinstance(self.raw_response, dict):
+            return None
+        preference = self.raw_response.get("preference")
+        if isinstance(preference, dict):
+            return preference
+        if "init_point" in self.raw_response or "sandbox_init_point" in self.raw_response:
+            return self.raw_response
+        return None

@@ -12,8 +12,8 @@ from app.schemas.order_schema import (
     OrderStatusUpdateRequest,
 )
 from app.schemas.payment_schema import OrderPaymentStatusResponse, PaymentResponse, PixOrderCreateResponse
-from app.services.order_service import OrderService
 from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
+from app.services.order_service import OrderService
 
 router = APIRouter(tags=["Orders"])
 
@@ -36,13 +36,23 @@ async def create_order(
     return await OrderService(db).create_order(data, current_user)
 
 
+@router.post("/orders/checkout-pro", response_model=PixOrderCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_checkout_pro_order(
+    data: OrderCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    return await OrderService(db).create_checkout_pro_order(data, current_user)
+
+
 @router.post("/orders/pix", response_model=PixOrderCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_pix_order(
     data: OrderCreateRequest,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles(RoleId.CUSTOMER)),
 ):
-    return await OrderService(db).create_pix_online_order(data, current_user)
+    # Compatibilidade: a rota antiga agora cria Checkout Pro.
+    return await OrderService(db).create_checkout_pro_order(data, current_user)
 
 
 @router.get("/orders/my", response_model=OrderListResponse)
@@ -95,8 +105,8 @@ async def get_order_payment_status(
 ):
     order = await OrderService(db).get_order(order_id, current_user)
     payment_service = MercadoPagoPixPaymentService(db)
-    payment = await payment_service.payment_repository.get_latest_by_order(order.id)
-    if payment and payment.provider_payment_id and payment.status in {PaymentStatus.PENDING.value, PaymentStatus.IN_PROCESS.value}:
+    payment = await payment_service.payment_repository.get_latest_online_by_order(order.id)
+    if payment and payment.status in {PaymentStatus.PENDING.value, PaymentStatus.IN_PROCESS.value}:
         payment = await payment_service.refresh_payment_from_provider(payment)
     action_flags = payment_service.get_payment_action_flags(order, payment)
     return OrderPaymentStatusResponse(
@@ -108,8 +118,8 @@ async def get_order_payment_status(
     )
 
 
-@router.post("/orders/{order_id}/payments/pix/cancel", response_model=PaymentResponse)
-async def cancel_pix_payment(
+@router.post("/orders/{order_id}/payments/checkout-pro/cancel", response_model=PaymentResponse)
+async def cancel_checkout_pro_payment(
     order_id: int,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles(RoleId.CUSTOMER)),
@@ -119,14 +129,38 @@ async def cancel_pix_payment(
     return payment
 
 
+@router.post("/orders/{order_id}/payments/pix/cancel", response_model=PaymentResponse)
+async def cancel_pix_payment(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    # Compatibilidade com frontend/rotas antigas.
+    order = await OrderService(db).get_order(order_id, current_user)
+    payment = await MercadoPagoPixPaymentService(db).cancel_pending_pix_payment(order, current_user)
+    return payment
+
+
+@router.post("/orders/{order_id}/payments/checkout-pro/regenerate", response_model=PaymentResponse)
+async def regenerate_checkout_pro_payment(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.CUSTOMER)),
+):
+    order = await OrderService(db).get_order(order_id, current_user)
+    payment = await MercadoPagoPixPaymentService(db).regenerate_checkout_pro_payment_for_order(order, current_user)
+    return payment
+
+
 @router.post("/orders/{order_id}/payments/pix/regenerate", response_model=PaymentResponse)
 async def regenerate_pix_payment(
     order_id: int,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles(RoleId.CUSTOMER)),
 ):
+    # Compatibilidade com frontend/rotas antigas.
     order = await OrderService(db).get_order(order_id, current_user)
-    payment = await MercadoPagoPixPaymentService(db).regenerate_pix_payment_for_order(order, current_user)
+    payment = await MercadoPagoPixPaymentService(db).regenerate_checkout_pro_payment_for_order(order, current_user)
     return payment
 
 

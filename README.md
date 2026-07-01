@@ -1,6 +1,6 @@
 # DishDash / Delivery System — Backend
 
-API backend do **DishDash / Delivery System**, desenvolvida com **FastAPI**, **PostgreSQL** e **Redis**.  
+API backend do **DishDash / Delivery System**, desenvolvida com **FastAPI**, **PostgreSQL** e **Redis**.
 O backend concentra autenticação, cadastro de empresas, catálogo de produtos, pedidos, entrega/retirada, pagamentos via Mercado Pago, avaliações de restaurantes, acompanhamento em tempo real e regras operacionais do sistema.
 
 ## Sumário
@@ -257,6 +257,12 @@ Com backend e frontend rodando:
 
 ## Webhook Mercado Pago com ngrok
 
+Instale e configure o ngrok. Link para download: https://ngrok.com/download
+
+Configure seu authtoken com o comando abaixo:
+```bash
+ngrok config add-authtoken "<YOUR_AUTHTOKEN>"
+```
 Para testar webhooks localmente, rode:
 
 ```bash

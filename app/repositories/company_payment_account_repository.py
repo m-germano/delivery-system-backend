@@ -23,6 +23,15 @@ class CompanyPaymentAccountRepository:
         )
         return list(result.scalars().all())
 
+    async def list_active_by_provider(self, provider: str) -> list[CompanyPaymentAccount]:
+        result = await self.session.execute(
+            select(CompanyPaymentAccount)
+            .where(CompanyPaymentAccount.provider == provider)
+            .where(CompanyPaymentAccount.is_active.is_(True))
+            .order_by(CompanyPaymentAccount.created_at.desc(), CompanyPaymentAccount.id.desc())
+        )
+        return list(result.scalars().all())
+
     async def get_by_id_and_company(self, account_id: int, company_id: int) -> CompanyPaymentAccount | None:
         result = await self.session.execute(
             select(CompanyPaymentAccount)

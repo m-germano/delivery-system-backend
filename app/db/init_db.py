@@ -176,6 +176,11 @@ async def ensure_schema_compatibility(db_engine: AsyncEngine = engine) -> None:
 
     if "companies" in existing_tables:
         async with db_engine.begin() as conn:
+
+            await conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_open BOOLEAN DEFAULT false"))
+            await conn.execute(text("UPDATE companies SET is_open = false WHERE is_open IS NULL"))
+            await conn.execute(text("ALTER TABLE companies ALTER COLUMN is_open SET DEFAULT false"))
+            await conn.execute(text("ALTER TABLE companies ALTER COLUMN is_open SET NOT NULL"))
             await conn.execute(
                 text(
                     """

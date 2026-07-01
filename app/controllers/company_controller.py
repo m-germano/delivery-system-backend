@@ -5,7 +5,14 @@ from app.core.enums import RoleId
 from app.core.security import require_roles
 from app.db.session import get_db
 from app.schemas.company_order_settings_schema import CompanyOrderSettingsResponse, CompanyOrderSettingsUpdateRequest
-from app.schemas.company_schema import CompanyCreateRequest, CompanyListResponse, CompanyNearbyListResponse, CompanyResponse, CompanyUpdateRequest
+from app.schemas.company_schema import (
+    CompanyCreateRequest,
+    CompanyListResponse,
+    CompanyNearbyListResponse,
+    CompanyOpenStatusRequest,
+    CompanyResponse,
+    CompanyUpdateRequest,
+)
 from app.services.company_order_settings_service import CompanyOrderSettingsService
 from app.services.company_service import CompanyService
 
@@ -61,6 +68,15 @@ async def update_my_company(
     current_user=Depends(require_roles(RoleId.COMPANY)),
 ):
     return await CompanyService(db).update_my_company(data, current_user)
+
+
+@router.patch("/me/open-status", response_model=CompanyResponse)
+async def update_my_company_open_status(
+    data: CompanyOpenStatusRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(RoleId.COMPANY)),
+):
+    return await CompanyService(db).update_my_company_open_status(data, current_user)
 
 
 @router.get("/me/order-settings", response_model=CompanyOrderSettingsResponse)

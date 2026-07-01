@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -22,6 +23,9 @@ class FakeSession:
     async def commit(self):
         return None
 
+    async def rollback(self):
+        return None
+
     async def refresh(self, instance):
         return None
 
@@ -30,13 +34,17 @@ class FakeSession:
 
 
 class FakeAccountRepository:
-    def __init__(self, account=None):
+    def __init__(self, account=None, accounts=None):
         self.account = account
+        self.accounts = accounts if accounts is not None else ([account] if account else [])
 
     async def get_active_by_company_and_provider(self, company_id, provider):
         if self.account and self.account.company_id == company_id and self.account.provider == provider and self.account.is_active:
             return self.account
         return None
+
+    async def list_active_by_provider(self, provider):
+        return [account for account in self.accounts if account and account.provider == provider and account.is_active]
 
 
 class FakePaymentRepository:
@@ -52,13 +60,31 @@ class FakePaymentRepository:
         self.latest_payment = payment
         return payment
 
-    async def get_latest_pix_by_order(self, order_id):
+    async def get_by_id(self, payment_id):
+        if self.latest_payment and self.latest_payment.id == payment_id:
+            return self.latest_payment
+        return None
+
+    async def get_by_id_and_order(self, payment_id, order_id):
+        if self.latest_payment and self.latest_payment.id == payment_id and self.latest_payment.order_id == order_id:
+            return self.latest_payment
+        return None
+
+    async def get_latest_online_by_order(self, order_id):
         if self.latest_payment and self.latest_payment.order_id == order_id:
             return self.latest_payment
         return None
 
+    async def get_latest_pix_by_order(self, order_id):
+        return await self.get_latest_online_by_order(order_id)
+
     async def get_by_provider_payment_id(self, provider_payment_id):
-        if self.latest_payment and self.latest_payment.provider_payment_id == provider_payment_id:
+        if self.latest_payment and self.latest_payment.provider_payment_id == str(provider_payment_id):
+            return self.latest_payment
+        return None
+
+    async def get_by_provider_order_id(self, provider_order_id):
+        if self.latest_payment and self.latest_payment.provider_order_id == str(provider_order_id):
             return self.latest_payment
         return None
 
@@ -96,53 +122,125 @@ def make_payment_for_refund(status_value=PaymentStatus.APPROVED.value):
     )
 
 
+def make_pending_checkout_payment(**overrides):
+    payload = {
+        "id": 1,
+        "order_id": 10,
+        "company_id": 1,
+        "provider": "mercado_pago",
+        "status": PaymentStatus.PENDING.value,
+        "provider_payment_id": None,
+        "provider_order_id": "pref-123",
+        "provider_status": "preference_created",
+        "provider_status_detail": None,
+        "raw_status": "preference_created",
+        "raw_status_detail": None,
+        "raw_response": {
+            "preference": {
+                "id": "pref-123",
+                "init_point": "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-123",
+                "sandbox_init_point": "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-123",
+            }
+        },
+        "qr_code": None,
+        "qr_code_base64": None,
+        "paid_at": None,
+        "refunded_at": None,
+        "cancelled_at": None,
+        "failed_at": None,
+        "payment_method": "pix",
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
+
+
 @pytest.mark.asyncio
 async def test_pix_unavailable_when_company_has_no_active_mercado_pago_account():
     service = MercadoPagoPixPaymentService(FakeSession())
     service.account_repository = FakeAccountRepository(account=None)
 
     assert await service.is_pix_available_for_company(1) is False
+    assert await service.is_checkout_pro_available_for_company(1) is False
 
 
 @pytest.mark.asyncio
-async def test_create_pix_payment_for_order_with_connected_company(monkeypatch):
+async def test_create_pix_payment_for_order_with_connected_company_creates_checkout_pro_preference(monkeypatch):
     order = SimpleNamespace(id=10, company_id=1, total=Decimal("42.50"))
     payer = SimpleNamespace(id=99, name="Cliente Teste", email="cliente@example.com")
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
     captured_payload = {}
 
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.FRONTEND_BASE_URL", "https://frontend.test")
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_SUCCESS_URL", None)
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_FAILURE_URL", None)
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_PENDING_URL", None)
+    monkeypatch.setattr(
+        "app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_URL",
+        "https://backend.test/api/payments/mercado-pago/webhook",
+    )
+
     service = MercadoPagoPixPaymentService(FakeSession())
     service.account_repository = FakeAccountRepository(account=account)
     service.payment_repository = FakePaymentRepository()
 
-    async def fake_create_mp_payment(account, payload, *, idempotency_key):
+    async def fake_create_mp_preference(account, payload, *, idempotency_key):
         captured_payload.update(payload)
-        assert payload["payment_method_id"] == "pix"
+
         assert payload["external_reference"] == str(order.id)
-        assert payload["metadata"]["order_id"] == order.id
-        expiration = datetime.fromisoformat(payload["date_of_expiration"])
+        assert payload["metadata"] == {
+            "order_id": order.id,
+            "company_id": order.company_id,
+            "local_payment_id": 1,
+        }
+        assert payload["items"] == [
+            {
+                "id": str(order.id),
+                "title": f"Pedido #{order.id}",
+                "description": "Pedido realizado no DishDash",
+                "quantity": 1,
+                "unit_price": 42.5,
+                "currency_id": "BRL",
+            }
+        ]
+        assert payload["payer"] == {
+            "email": "cliente@example.com",
+            "name": "Cliente",
+            "surname": "Teste",
+        }
+        assert payload["back_urls"] == {
+            "success": "https://frontend.test/checkout/pix/10?mp_result=success",
+            "failure": "https://frontend.test/checkout/pix/10?mp_result=failure",
+            "pending": "https://frontend.test/checkout/pix/10?mp_result=pending",
+        }
+        assert payload["auto_return"] == "approved"
+        assert payload["expires"] is True
+        assert payload["statement_descriptor"] == "DISHDASH"
+
+        expiration = datetime.fromisoformat(payload["expiration_date_to"])
         assert expiration.tzinfo is not None
         assert expiration.utcoffset() is not None
         assert expiration > datetime.now(ZoneInfo("America/Sao_Paulo"))
-        assert payload["date_of_expiration"] == expiration.isoformat(timespec="milliseconds")
-        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}-\d{2}:\d{2}$", payload["date_of_expiration"])
-        assert payload["date_of_expiration"].endswith(".000-03:00")
-        assert "UTC" not in payload["date_of_expiration"]
-        assert not re.match(r"^\d{2}-\d{2}-\d{4}T", payload["date_of_expiration"])
-        assert idempotency_key
+        assert payload["expiration_date_to"] == expiration.isoformat(timespec="milliseconds")
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}-\d{2}:\d{2}$", payload["expiration_date_to"])
+        assert payload["expiration_date_to"].endswith(".000-03:00")
+        assert "UTC" not in payload["expiration_date_to"]
+        assert not re.match(r"^\d{2}-\d{2}-\d{4}T", payload["expiration_date_to"])
+
+        parsed_notification_url = urlparse(payload["notification_url"])
+        parsed_query = parse_qs(parsed_notification_url.query)
+        assert parsed_notification_url.scheme == "https"
+        assert parsed_notification_url.netloc == "backend.test"
+        assert parsed_query["order_id"] == ["10"]
+        assert parsed_query["local_payment_id"] == ["1"]
+
+        assert idempotency_key.startswith("order-10-checkout-pro-")
         return {
-            "id": 123456,
-            "status": "pending",
-            "status_detail": "pending_waiting_payment",
-            "point_of_interaction": {
-                "transaction_data": {
-                    "qr_code": "000201-copy-paste",
-                    "qr_code_base64": "base64-image",
-                }
-            },
+            "id": "1639933473-pref-test",
+            "init_point": "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=1639933473-pref-test",
+            "sandbox_init_point": "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=1639933473-pref-test",
         }
 
-    monkeypatch.setattr(service, "_create_mercado_pago_payment", fake_create_mp_payment)
+    monkeypatch.setattr(service, "_create_mercado_pago_preference", fake_create_mp_preference)
 
     payment = await service.create_pix_payment_for_order(order, payer)
 
@@ -150,10 +248,14 @@ async def test_create_pix_payment_for_order_with_connected_company(monkeypatch):
     assert payment.company_id == order.company_id
     assert payment.payment_method == "pix"
     assert payment.status == PaymentStatus.PENDING.value
-    assert payment.provider_payment_id == "123456"
-    assert payment.qr_code == "000201-copy-paste"
-    assert payment.qr_code_base64 == "base64-image"
-    assert payment.expires_at.isoformat(timespec="milliseconds") == captured_payload["date_of_expiration"]
+    assert payment.provider_payment_id is None
+    assert payment.provider_order_id == "1639933473-pref-test"
+    assert payment.checkout_preference_id == "1639933473-pref-test"
+    assert payment.checkout_url == "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=1639933473-pref-test"
+    assert payment.sandbox_checkout_url == "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=1639933473-pref-test"
+    assert payment.qr_code is None
+    assert payment.qr_code_base64 is None
+    assert payment.expires_at.isoformat(timespec="milliseconds") == captured_payload["expiration_date_to"]
 
 
 def test_format_mercado_pago_expiration_uses_iso_year_first_with_offset():
@@ -168,11 +270,12 @@ def test_format_mercado_pago_expiration_uses_iso_year_first_with_offset():
     assert not re.match(r"^\d{2}-\d{2}-\d{4}T", date_of_expiration)
 
 
-def test_pix_expiration_uses_sao_paulo_timezone_and_minimum_30_minutes(monkeypatch):
+def test_checkout_expiration_uses_sao_paulo_timezone_and_minimum_30_minutes(monkeypatch):
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_EXPIRATION_MINUTES", 5)
     monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_PIX_EXPIRATION_MINUTES", 5)
 
     before = datetime.now(ZoneInfo("America/Sao_Paulo"))
-    expires_at = MercadoPagoPixPaymentService._build_pix_expiration_datetime()
+    expires_at = MercadoPagoPixPaymentService._build_checkout_expiration_datetime()
     after = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
     assert expires_at.tzinfo is not None
@@ -183,21 +286,47 @@ def test_pix_expiration_uses_sao_paulo_timezone_and_minimum_30_minutes(monkeypat
     assert (expires_at - after).total_seconds() <= 30 * 60 + 1
 
 
-def test_build_pix_payload_sends_notification_url_when_configured(monkeypatch):
-    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_URL", "https://example.com/api/payments/mercado-pago/webhook")
+def test_build_checkout_preference_payload_sends_notification_url_and_back_urls_when_configured(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_URL",
+        "https://example.com/api/payments/mercado-pago/webhook",
+    )
+    monkeypatch.setattr(
+        "app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_SUCCESS_URL",
+        "https://example.com/api/payments/mercado-pago/checkout-return?order_id={order_id}&mp_result=success",
+    )
+    monkeypatch.setattr(
+        "app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_FAILURE_URL",
+        "https://example.com/api/payments/mercado-pago/checkout-return?order_id={order_id}&mp_result=failure",
+    )
+    monkeypatch.setattr(
+        "app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_CHECKOUT_PENDING_URL",
+        "https://example.com/api/payments/mercado-pago/checkout-return?order_id={order_id}&mp_result=pending",
+    )
+
     service = MercadoPagoPixPaymentService(FakeSession())
     order = SimpleNamespace(id=10, company_id=1, total=Decimal("42.50"))
     payer = SimpleNamespace(name="Cliente Teste", email="cliente@example.com")
+    payment = SimpleNamespace(id=15)
     expires_at = datetime(2026, 6, 24, 3, 8, 42, tzinfo=ZoneInfo("America/Sao_Paulo"))
 
-    payload = service._build_pix_payload(order, payer, expires_at)
-    sanitized_payload = service._sanitize_pix_create_payload_for_log(payload)
+    payload = service._build_checkout_preference_payload(order, payer, payment, expires_at)
+    sanitized_payload = service._sanitize_checkout_preference_payload_for_log(payload)
+    parsed_notification_url = urlparse(payload["notification_url"])
+    parsed_query = parse_qs(parsed_notification_url.query)
 
-    assert payload["notification_url"] == "https://example.com/api/payments/mercado-pago/webhook"
+    assert payload["notification_url"].startswith("https://example.com/api/payments/mercado-pago/webhook?")
+    assert parsed_query["order_id"] == ["10"]
+    assert parsed_query["local_payment_id"] == ["15"]
+    assert payload["back_urls"] == {
+        "success": "https://example.com/api/payments/mercado-pago/checkout-return?order_id=10&mp_result=success",
+        "failure": "https://example.com/api/payments/mercado-pago/checkout-return?order_id=10&mp_result=failure",
+        "pending": "https://example.com/api/payments/mercado-pago/checkout-return?order_id=10&mp_result=pending",
+    }
     assert sanitized_payload["has_notification_url"] is True
-    assert sanitized_payload["date_of_expiration"] == "2026-06-24T03:08:42.000-03:00"
+    assert sanitized_payload["has_back_urls"] is True
+    assert sanitized_payload["expiration_date_to"] == "2026-06-24T03:08:42.000-03:00"
     assert sanitized_payload["transaction_amount"] == 42.5
-    assert sanitized_payload["payment_method_id"] == "pix"
     assert sanitized_payload["external_reference"] == "10"
     assert sanitized_payload["has_payer_email"] is True
 
@@ -240,7 +369,7 @@ async def test_cancel_pending_pix_payment_does_not_cancel_order():
 
 
 @pytest.mark.asyncio
-async def test_regenerate_pix_after_cancelled_payment_keeps_order_waiting_and_creates_new_payment(monkeypatch):
+async def test_regenerate_pix_after_cancelled_payment_keeps_order_waiting_and_creates_new_checkout_link(monkeypatch):
     current_user = SimpleNamespace(id=7, name="Cliente Teste", email="cliente@example.com")
     order = SimpleNamespace(id=10, company_id=1, customer_user_id=7, status=OrderStatus.PENDING_PAYMENT.value, total=Decimal("42.50"))
     latest_payment = SimpleNamespace(
@@ -249,6 +378,7 @@ async def test_regenerate_pix_after_cancelled_payment_keeps_order_waiting_and_cr
         company_id=1,
         status=PaymentStatus.CANCELLED.value,
         provider_payment_id="old-payment",
+        provider_order_id="old-preference",
     )
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
 
@@ -256,27 +386,24 @@ async def test_regenerate_pix_after_cancelled_payment_keeps_order_waiting_and_cr
     service.account_repository = FakeAccountRepository(account=account)
     service.payment_repository = FakePaymentRepository(latest_payment=latest_payment)
 
-    async def fake_create_mp_payment(account, payload, *, idempotency_key):
+    async def fake_create_mp_preference(account, payload, *, idempotency_key):
         return {
-            "id": 222,
-            "status": "pending",
-            "point_of_interaction": {
-                "transaction_data": {
-                    "qr_code": "new-copy-paste",
-                    "qr_code_base64": "new-base64-image",
-                }
-            },
+            "id": "new-preference",
+            "init_point": "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=new-preference",
+            "sandbox_init_point": "https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=new-preference",
         }
 
-    monkeypatch.setattr(service, "_create_mercado_pago_payment", fake_create_mp_payment)
+    monkeypatch.setattr(service, "_create_mercado_pago_preference", fake_create_mp_preference)
 
     new_payment = await service.regenerate_pix_payment_for_order(order, current_user)
 
     assert order.status == OrderStatus.PENDING_PAYMENT.value
     assert new_payment.id == 1
     assert new_payment.status == PaymentStatus.PENDING.value
-    assert new_payment.provider_payment_id == "222"
-    assert new_payment.qr_code == "new-copy-paste"
+    assert new_payment.provider_payment_id is None
+    assert new_payment.provider_order_id == "new-preference"
+    assert new_payment.checkout_url == "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=new-preference"
+    assert new_payment.qr_code is None
 
 
 @pytest.mark.asyncio
@@ -390,27 +517,11 @@ def test_payment_action_flags_after_cancelled_pix_payment():
 @pytest.mark.asyncio
 async def test_webhook_approved_updates_payment_and_releases_order(monkeypatch):
     order = SimpleNamespace(id=10, company_id=1, customer_user_id=7, status=OrderStatus.PENDING_PAYMENT.value, total=Decimal("42.50"))
-    payment = SimpleNamespace(
-        id=1,
-        order_id=10,
-        company_id=1,
-        provider="mercado_pago",
-        status=PaymentStatus.PENDING.value,
-        provider_payment_id="164726173751",
-        provider_order_id=None,
-        provider_status=PaymentStatus.PENDING.value,
-        provider_status_detail=None,
-        raw_status=None,
-        raw_status_detail=None,
-        raw_response=None,
-        qr_code=None,
-        qr_code_base64=None,
-        paid_at=None,
-    )
+    payment = make_pending_checkout_payment()
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
 
     async def fake_get_mp_payment(account, provider_payment_id):
-        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "42.50"}
+        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "42.50", "external_reference": str(order.id)}
 
     async def fake_publish_company_order_event(*args, **kwargs):
         return None
@@ -423,10 +534,14 @@ async def test_webhook_approved_updates_payment_and_releases_order(monkeypatch):
     service.account_repository = FakeAccountRepository(account)
     monkeypatch.setattr(service, "_get_mercado_pago_payment", fake_get_mp_payment)
 
-    await service.process_mercado_pago_webhook({"data": {"id": "164726173751"}})
+    await service.process_mercado_pago_webhook(
+        {"type": "payment", "data": {"id": "164726173751"}},
+        query_params={"local_payment_id": "1", "order_id": "10"},
+    )
 
     assert payment.status == PaymentStatus.APPROVED.value
     assert payment.provider_status == "approved"
+    assert payment.provider_payment_id == "164726173751"
     assert payment.paid_at is not None
     assert order.status == OrderStatus.OPEN.value
 
@@ -434,27 +549,11 @@ async def test_webhook_approved_updates_payment_and_releases_order(monkeypatch):
 @pytest.mark.asyncio
 async def test_payment_status_fallback_approved_releases_order(monkeypatch):
     order = SimpleNamespace(id=10, company_id=1, customer_user_id=7, status=OrderStatus.PENDING_PAYMENT.value, total=Decimal("42.50"))
-    payment = SimpleNamespace(
-        id=1,
-        order_id=10,
-        company_id=1,
-        provider="mercado_pago",
-        status=PaymentStatus.PENDING.value,
-        provider_payment_id="164726173751",
-        provider_order_id=None,
-        provider_status=PaymentStatus.PENDING.value,
-        provider_status_detail=None,
-        raw_status=None,
-        raw_status_detail=None,
-        raw_response=None,
-        qr_code=None,
-        qr_code_base64=None,
-        paid_at=None,
-    )
+    payment = make_pending_checkout_payment(provider_payment_id="164726173751", provider_status=PaymentStatus.PENDING.value)
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
 
     async def fake_get_mp_payment(account, provider_payment_id):
-        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "42.50"}
+        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "42.50", "external_reference": str(order.id)}
 
     async def fake_publish_company_order_event(*args, **kwargs):
         return None
@@ -475,27 +574,11 @@ async def test_payment_status_fallback_approved_releases_order(monkeypatch):
 @pytest.mark.asyncio
 async def test_payment_status_fallback_pending_keeps_pending(monkeypatch):
     order = SimpleNamespace(id=10, company_id=1, customer_user_id=7, status=OrderStatus.PENDING_PAYMENT.value, total=Decimal("42.50"))
-    payment = SimpleNamespace(
-        id=1,
-        order_id=10,
-        company_id=1,
-        provider="mercado_pago",
-        status=PaymentStatus.PENDING.value,
-        provider_payment_id="164726173751",
-        provider_order_id=None,
-        provider_status=PaymentStatus.PENDING.value,
-        provider_status_detail=None,
-        raw_status=None,
-        raw_status_detail=None,
-        raw_response=None,
-        qr_code=None,
-        qr_code_base64=None,
-        paid_at=None,
-    )
+    payment = make_pending_checkout_payment(provider_payment_id="164726173751", provider_status=PaymentStatus.PENDING.value)
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
 
     async def fake_get_mp_payment(account, provider_payment_id):
-        return {"id": provider_payment_id, "status": "pending", "transaction_amount": "42.50"}
+        return {"id": provider_payment_id, "status": "pending", "transaction_amount": "42.50", "external_reference": str(order.id)}
 
     service = MercadoPagoPixPaymentService(FakeSession())
     service.order_repository = FakeOrderRepository(order)
@@ -511,27 +594,11 @@ async def test_payment_status_fallback_pending_keeps_pending(monkeypatch):
 @pytest.mark.asyncio
 async def test_approved_payment_with_amount_mismatch_does_not_release_order(monkeypatch):
     order = SimpleNamespace(id=10, company_id=1, customer_user_id=7, status=OrderStatus.PENDING_PAYMENT.value, total=Decimal("42.50"))
-    payment = SimpleNamespace(
-        id=1,
-        order_id=10,
-        company_id=1,
-        provider="mercado_pago",
-        status=PaymentStatus.PENDING.value,
-        provider_payment_id="164726173751",
-        provider_order_id=None,
-        provider_status=PaymentStatus.PENDING.value,
-        provider_status_detail=None,
-        raw_status=None,
-        raw_status_detail=None,
-        raw_response=None,
-        qr_code=None,
-        qr_code_base64=None,
-        paid_at=None,
-    )
+    payment = make_pending_checkout_payment(provider_payment_id="164726173751", provider_status=PaymentStatus.PENDING.value)
     account = SimpleNamespace(company_id=1, provider="mercado_pago", is_active=True, access_token_encrypted="encrypted")
 
     async def fake_get_mp_payment(account, provider_payment_id):
-        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "41.00"}
+        return {"id": provider_payment_id, "status": "approved", "transaction_amount": "41.00", "external_reference": str(order.id)}
 
     service = MercadoPagoPixPaymentService(FakeSession())
     service.order_repository = FakeOrderRepository(order)

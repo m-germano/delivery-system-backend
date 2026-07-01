@@ -60,6 +60,9 @@ class PaymentResponse(BaseModel):
     provider: str
     provider_payment_id: str | None = None
     provider_order_id: str | None = None
+    checkout_preference_id: str | None = None
+    checkout_url: str | None = None
+    sandbox_checkout_url: str | None = None
     idempotency_key: str | None = None
     payment_method: str | None = None
     status: str
@@ -91,12 +94,19 @@ class CompanyPaymentAvailabilityResponse(BaseModel):
     company_id: int
     mercado_pago_connected: bool
     pix_online_available: bool
+    checkout_pro_available: bool = False
 
 
 class PixOrderCreateResponse(BaseModel):
+    # Nome mantido por compatibilidade com o frontend/rota antiga.
+    # O fluxo atual é Checkout Pro.
     order_id: int
     payment_id: int
     provider_payment_id: str | None = None
+    provider_order_id: str | None = None
+    checkout_preference_id: str | None = None
+    checkout_url: str | None = None
+    sandbox_checkout_url: str | None = None
     payment_status: str
     qr_code: str | None = None
     qr_code_base64: str | None = None

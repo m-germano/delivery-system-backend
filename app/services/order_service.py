@@ -70,6 +70,7 @@ class OrderService:
     async def calculate_order(self, data: OrderCreateRequest, current_user: User) -> OrderCalculationResponse:
         self._ensure_customer(current_user)
         company = await self._get_active_company_with_location(data.company_id)
+        self._ensure_company_is_open_for_orders(company)
         order_settings = await self.company_order_settings_repository.get_or_create_default(company.id)
         product_map = await self._get_products_for_order(data)
 
@@ -181,19 +182,39 @@ class OrderService:
         return await self._get_visible_order(order.id, current_user)
 
     async def create_pix_online_order(self, data: OrderCreateRequest, current_user: User) -> PixOrderCreateResponse:
+        # Alias legado: a rota /orders/pix continua existindo para não quebrar o frontend,
+        # mas o fluxo atual cria uma preferência de Checkout Pro no Mercado Pago.
+        return await self.create_checkout_pro_order(data, current_user)
+
+    async def create_checkout_pro_order(self, data: OrderCreateRequest, current_user: User) -> PixOrderCreateResponse:
         from app.services.mercado_pago_pix_payment_service import MercadoPagoPixPaymentService
 
         data.payment_method = PaymentMethod.PIX_ONLINE
-        order = await self._create_order_with_status(data, current_user, OrderStatus.PENDING_PAYMENT.value)
-        await self.session.commit()
-        await self.session.refresh(order)
+        payment_service = MercadoPagoPixPaymentService(self.session)
 
-        payment = await MercadoPagoPixPaymentService(self.session).create_pix_payment_for_order(order, current_user)
+        calculation = await self.calculate_order(data, current_user)
+        if not await payment_service.is_checkout_pro_available_for_company(calculation.company_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Empresa não possui Mercado Pago conectado.")
+
+        order = await self._create_order_with_status(data, current_user, OrderStatus.PENDING_PAYMENT.value)
+
+        try:
+            payment = await payment_service.create_checkout_pro_payment_for_order(order, current_user)
+        except HTTPException:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise
 
         return PixOrderCreateResponse(
             order_id=order.id,
             payment_id=payment.id,
             provider_payment_id=payment.provider_payment_id,
+            provider_order_id=payment.provider_order_id,
+            checkout_preference_id=payment.checkout_preference_id,
+            checkout_url=payment.checkout_url,
+            sandbox_checkout_url=payment.sandbox_checkout_url,
             payment_status=payment.status,
             qr_code=payment.qr_code,
             qr_code_base64=payment.qr_code_base64,
@@ -745,6 +766,14 @@ class OrderService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Empresa sem latitude/longitude configurada.")
 
         return company
+
+    @staticmethod
+    def _ensure_company_is_open_for_orders(company) -> None:
+        if not getattr(company, "is_open", False):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A loja está fechada no momento.",
+            )
 
     async def _get_customer_address_for_order(self, customer_address_id: int | None, customer_user_id: int):
         if customer_address_id:

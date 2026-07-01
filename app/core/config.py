@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     TOKEN_ENCRYPTION_KEY: str | None = None
 
+    BACKEND_PUBLIC_URL: str | None = None
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
+
     MERCADO_PAGO_CLIENT_ID: str | None = None
     MERCADO_PAGO_CLIENT_SECRET: str | None = None
     MERCADO_PAGO_USE_PKCE: bool = True
@@ -33,9 +36,16 @@ class Settings(BaseSettings):
     MERCADO_PAGO_OAUTH_AUTHORIZE_URL: str = "https://auth.mercadopago.com.br/authorization"
     MERCADO_PAGO_OAUTH_TOKEN_URL: str = "https://api.mercadopago.com/oauth/token"
     MERCADO_PAGO_PAYMENTS_URL: str = "https://api.mercadopago.com/v1/payments"
+    MERCADO_PAGO_CHECKOUT_PREFERENCES_URL: str = "https://api.mercadopago.com/checkout/preferences"
     MERCADO_PAGO_WEBHOOK_URL: str | None = None
     MERCADO_PAGO_WEBHOOK_SECRET: str | None = None
+    MERCADO_PAGO_WEBHOOK_TOLERANCE_SECONDS: int = 600
     MERCADO_PAGO_PIX_EXPIRATION_MINUTES: int = 30
+    MERCADO_PAGO_CHECKOUT_EXPIRATION_MINUTES: int | None = None
+    MERCADO_PAGO_CHECKOUT_SUCCESS_URL: str | None = None
+    MERCADO_PAGO_CHECKOUT_PENDING_URL: str | None = None
+    MERCADO_PAGO_CHECKOUT_FAILURE_URL: str | None = None
+
     FRONTEND_MERCADO_PAGO_SUCCESS_URL: str = "http://localhost:5173/company/mercado-pago?connected=true"
     FRONTEND_MERCADO_PAGO_ERROR_URL: str = "http://localhost:5173/company/mercado-pago?connected=false"
 

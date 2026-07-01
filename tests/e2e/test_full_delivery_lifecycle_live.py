@@ -5,7 +5,7 @@ Este teste é opcional e roda contra a API real em execução.
 Ele valida o fluxo completo:
 
 1. Cadastra empresa, cliente e entregador.
-2. Empresa cria cadastro, categoria e produto.
+2. Empresa cria cadastro, abre a loja, cria categoria e produto.
 3. Cliente cria endereço e pedido.
 4. Empresa aceita o pedido e libera para entregador.
 5. Entregador fica disponível, pega a entrega da fila e aceita.
@@ -154,7 +154,16 @@ def test_fluxo_completo_pedido_entrega_codigo_confirmacao() -> None:
             },
         )
         assert_success(company_response, {200, 201})
-        company_id = company_response.json()["id"]
+        company_payload = company_response.json()
+        company_id = company_payload["id"]
+        assert company_payload["is_open"] is False
+
+        open_company_response = company.patch(
+            "/companies/me/open-status",
+            json={"is_open": True},
+        )
+        assert_success(open_company_response, 200)
+        assert open_company_response.json()["is_open"] is True
 
         category_response = company.post(
             "/product-categories",
