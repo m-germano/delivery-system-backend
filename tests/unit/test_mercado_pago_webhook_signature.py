@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,9 @@ class FakeRequest:
         self._payload = payload
         self.headers = headers or {}
         self.query_params = query_params or {}
+
+    async def body(self):
+        return json.dumps(self._payload).encode("utf-8")
 
     async def json(self):
         return self._payload
@@ -138,6 +142,25 @@ async def test_webhook_accepts_data_id_from_query_params(monkeypatch):
             },
             query_params={"data.id": provider_payment_id},
         ),
+        db=SimpleNamespace(),
+    )
+
+    assert response.received is True
+    assert processed["called"] is True
+
+
+@pytest.mark.asyncio
+async def test_webhook_ignores_oauth_application_events_even_with_secret(monkeypatch):
+    monkeypatch.setattr("app.services.mercado_pago_pix_payment_service.settings.MERCADO_PAGO_WEBHOOK_SECRET", "webhook-secret")
+    processed = {"called": False}
+
+    async def fake_process(self, payload, *, query_params=None):
+        processed["called"] = True
+
+    monkeypatch.setattr(MercadoPagoPixPaymentService, "process_mercado_pago_webhook", fake_process)
+
+    response = await mercado_pago_webhook(
+        FakeRequest({"action": "application.authorized", "type": "mp-connect", "data": {"id": "app-1"}}),
         db=SimpleNamespace(),
     )
 
