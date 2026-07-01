@@ -225,6 +225,94 @@ class CompanyPaymentAccountService:
 
         return account
 
+    async def refresh_mercado_pago_access_token(self, account: CompanyPaymentAccount) -> CompanyPaymentAccount:
+        """Renova o access token OAuth da conta Mercado Pago conectada.
+
+        O fluxo de pagamento usa tokens por empresa/restaurante salvos no banco.
+        Quando o access_token estiver perto de expirar, esta rotina usa o
+        refresh_token criptografado para obter novas credenciais e persistir
+        o resultado antes de chamar a API de pagamentos.
+        """
+        self._ensure_mercado_pago_oauth_settings()
+
+        if account.provider != PaymentAccountProvider.MERCADO_PAGO.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Provider de pagamento não suportado.")
+
+        if not account.refresh_token_encrypted:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conta Mercado Pago sem refresh token para renovação.")
+
+        refresh_token = decrypt_secret(account.refresh_token_encrypted)
+        payload = {
+            "grant_type": "refresh_token",
+            "client_id": settings.MERCADO_PAGO_CLIENT_ID,
+            "refresh_token": refresh_token,
+        }
+
+        if settings.MERCADO_PAGO_CLIENT_SECRET:
+            payload["client_secret"] = settings.MERCADO_PAGO_CLIENT_SECRET
+
+        logger.info(
+            "Renovando access token Mercado Pago. company_id=%s account_id=%s payload=%s",
+            account.company_id,
+            account.id,
+            _sanitize_for_log(payload),
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=settings.EXTERNAL_API_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    settings.MERCADO_PAGO_OAUTH_TOKEN_URL,
+                    data=payload,
+                    headers={"Accept": "application/json"},
+                )
+                if response.is_error:
+                    logger.warning(
+                        "Erro ao renovar token Mercado Pago. status_code=%s body=%s",
+                        response.status_code,
+                        self._sanitize_response_body_for_log(response),
+                    )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Mercado Pago recusou a renovação do token OAuth.",
+            ) from exc
+        except (httpx.RequestError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Não foi possível renovar o token OAuth do Mercado Pago.",
+            ) from exc
+
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Resposta inválida ao renovar token Mercado Pago.")
+
+        account.access_token_encrypted = encrypt_secret(str(data["access_token"]))
+
+        new_refresh_token = data.get("refresh_token")
+        if new_refresh_token:
+            account.refresh_token_encrypted = encrypt_secret(str(new_refresh_token))
+
+        account.token_expires_at = self._calculate_token_expires_at(data.get("expires_in"))
+
+        provider_user_id = data.get("user_id") or data.get("collector_id")
+        if provider_user_id is not None:
+            account.provider_user_id = str(provider_user_id)
+
+        public_key = data.get("public_key")
+        if public_key is not None:
+            account.public_key = str(public_key)
+
+        await self.session.commit()
+        await self.session.refresh(account)
+        logger.info(
+            "Access token Mercado Pago renovado com sucesso. company_id=%s account_id=%s token_expires_at=%s",
+            account.company_id,
+            account.id,
+            account.token_expires_at.isoformat() if account.token_expires_at else None,
+        )
+        return account
+
     async def _get_authorized_company(self, company_id: int, current_user: User) -> Company:
         company = await self.company_repository.get_by_id(company_id, include_inactive=True)
 

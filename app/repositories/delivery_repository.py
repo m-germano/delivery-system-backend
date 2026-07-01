@@ -10,6 +10,7 @@ DELIVERY_LOAD_OPTIONS = (
     selectinload(Delivery.order).selectinload(Order.status_history),
     selectinload(Delivery.order).selectinload(Order.company).selectinload(Company.address),
     selectinload(Delivery.order).selectinload(Order.customer_address),
+    selectinload(Delivery.order).selectinload(Order.review),  # <- adicionar
     selectinload(Delivery.status_history),
 )
 
